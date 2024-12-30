@@ -30,7 +30,7 @@ def main():
     Image.MAX_IMAGE_PIXELS = None
 
     args = train_options()
-    config = model_config()
+    config = model_config(args.model_name)
 
     os.environ['CUDA_VISIBLE_DEVICES'] = str(args.gpu_id)
     device = "cuda" if args.cuda and torch.cuda.is_available() else "cpu"

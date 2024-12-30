@@ -14,7 +14,7 @@ from compressai.datasets import ImageFolder
 from utils.logger import setup_logger
 from utils.utils import CustomDataParallel, save_checkpoint
 from utils.optimizers import configure_optimizers
-from utils.training import train_one_epoch, train_one_epoch_ddp
+from utils.training import train_one_epoch
 from utils.testing import test_one_epoch
 from loss.rd_loss import RateDistortionLoss
 from config.args import train_options
@@ -63,7 +63,7 @@ def main():
         [transforms.ToTensor()]
     )
 
-    train_dataset = ImageFolder(args.dataset, split="train", transform=train_transforms)
+    train_dataset = ImageFolder(args.dataset, split="train/openimagev7/testset", transform=train_transforms)
     test_dataset = ImageFolder(args.dataset, split="test", transform=test_transforms)
 
     train_dataloader = DataLoader(
@@ -119,8 +119,10 @@ def main():
     logger_train.info(net)
     logger_train.info(optimizer)
     optimizer.param_groups[0]['lr'] = args.learning_rate
+    
     for epoch in range(start_epoch, args.epochs):
         logger_train.info(f"Learning rate: {optimizer.param_groups[0]['lr']}")
+        
         current_step = train_one_epoch(
             net,
             criterion,

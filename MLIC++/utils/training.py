@@ -40,36 +40,45 @@ def get_gaussian_kernel(kernel_size=3, sigma=1, channels=3):
     
     return gaussian_filter
 
+from torch.cuda.amp.grad_scaler import GradScaler
+from torch.cuda.amp.autocast_mode import autocast
+
 def train_one_epoch(
     model, criterion, train_dataloader, optimizer, aux_optimizer, epoch, clip_max_norm, logger_train, tb_logger, current_step
 ):
+    amp = True
+    scaler = GradScaler(enabled=amp)
     model.train()
     device = next(model.parameters()).device
     gauss_k = get_gaussian_kernel().to(device)
-
     for i, d in enumerate(train_dataloader):
         d = d.to(device)
-
         # SR
-        blur_d = gauss_k(d)
+        # blur_d = gauss_k(d)
 
         optimizer.zero_grad()
         aux_optimizer.zero_grad()
+        
+        with autocast(enabled=amp):
+            out_net = model(d)
 
-        out_net = model(d)
+            out_criterion = criterion(out_net, d)
 
-        out_criterion = criterion(out_net, d)
-        out_criterion["loss"].backward()
+        scaler.scale(out_criterion["loss"]).backward()
+
         if clip_max_norm > 0:
             torch.nn.utils.clip_grad_norm_(model.parameters(), clip_max_norm)
-        optimizer.step()
+        # optimizer.step()
+        scaler.step(optimizer)
 
         aux_loss = model.aux_loss()
-        aux_loss.backward()
-        aux_optimizer.step()
+        scaler.scale(aux_loss).backward()
+        # aux_optimizer.step()
+        scaler.step(aux_optimizer)
+        scaler.update()
 
         current_step += 1
-        if current_step % 100 == 0:
+        if current_step % 20 == 0:
             tb_logger.add_scalar('{}'.format('[train]: loss'), out_criterion["loss"].item(), current_step)
             tb_logger.add_scalar('{}'.format('[train]: bpp_loss'), out_criterion["bpp_loss"].item(), current_step)
             tb_logger.add_scalar('{}'.format('[train]: lr'), optimizer.param_groups[0]['lr'], current_step)
@@ -79,7 +88,7 @@ def train_one_epoch(
             if out_criterion["ms_ssim_loss"] is not None:
                 tb_logger.add_scalar('{}'.format('[train]: ms_ssim_loss'), out_criterion["ms_ssim_loss"].item(), current_step)
 
-        if i % 100 == 0:
+        if i % 50 == 0:
             if out_criterion["ms_ssim_loss"] is None:
                 logger_train.info(
                     f"Train epoch {epoch}: ["
@@ -130,7 +139,7 @@ def warmup_one_epoch(
         aux_optimizer.step()
 
         current_step += 1
-        if current_step % 100 == 0:
+        if current_step % 20 == 0:
             tb_logger.add_scalar('{}'.format('[train]: loss'), out_criterion["loss"].item(), current_step)
             tb_logger.add_scalar('{}'.format('[train]: bpp_loss'), out_criterion["bpp_loss"].item(), current_step)
             tb_logger.add_scalar('{}'.format('[train]: lr'), optimizer.param_groups[0]['lr'], current_step)
@@ -140,7 +149,7 @@ def warmup_one_epoch(
             if out_criterion["ms_ssim_loss"] is not None:
                 tb_logger.add_scalar('{}'.format('[train]: ms_ssim_loss'), out_criterion["ms_ssim_loss"].item(), current_step)
 
-        if i % 100 == 0:
+        if i % 20 == 0:
             if out_criterion["ms_ssim_loss"] is None:
                 logger_train.info(
                     f"Train epoch {epoch}: ["

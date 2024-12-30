@@ -289,7 +289,7 @@ class MLICPlusPlus(CompressionModel):
                         # merge means and scales of anchor and nonanchor
                         scales_slice = ckbd_merge(scales_anchor, scales_nonanchor)
                         means_slice = ckbd_merge(means_anchor, means_nonanchor)
-                        _, y_slice_likelihoods = self.gaussian_conditional(y_slice, scales_slice, means_slice)
+                        _, y_slice_likelihoods = self.gaussian_conditional(y_slice * scale, scales_slice * scale, means_slice)
                         # round slice_nonanchor
                         slice_nonanchor = ste_round((slice_nonanchor - means_nonanchor) * scale) * rescale + means_nonanchor
                         y_hat_slice = slice_anchor + slice_nonanchor
@@ -325,7 +325,7 @@ class MLICPlusPlus(CompressionModel):
                         # merge means and scales of anchor and nonanchor
                         scales_slice = ckbd_merge(scales_anchor, scales_nonanchor)
                         means_slice = ckbd_merge(means_anchor, means_nonanchor)
-                        _, y_slice_likelihoods = self.gaussian_conditional(y_slice, scales_slice, means_slice)
+                        _, y_slice_likelihoods = self.gaussian_conditional(y_slice * scale, scales_slice * scale, means_slice)
                         # round slice_nonanchor
                         slice_nonanchor = ste_round((slice_nonanchor - means_nonanchor) * scale) * rescale + means_nonanchor
                         y_hat_slice = slice_anchor + slice_nonanchor
@@ -348,6 +348,8 @@ class MLICPlusPlus(CompressionModel):
                 self.local_context[i].update_resolution(H, W, next(self.parameters()).device, mask=None)
             else:
                 self.local_context[i].update_resolution(H, W, next(self.parameters()).device, mask=self.local_context[0].attn_mask)
+
+
 
     def compress(self, x):
         torch.cuda.synchronize()
@@ -620,9 +622,27 @@ class MLICPlusPlus(CompressionModel):
         )
         super().load_state_dict(state_dict)
 
-    def update(self, scale_table=None, force=False):
+    # def update(self, scale_table=None, force=False):
+    #     if scale_table is None:
+    #         scale_table = get_scale_table()
+    #     updated = self.gaussian_conditional.update_scale_table(scale_table, force=force)
+    #     updated |= super().update(force=force)
+    #     return updated
+    
+    def update(self, scale_table=None, force=False, scale=None):
         if scale_table is None:
             scale_table = get_scale_table()
         updated = self.gaussian_conditional.update_scale_table(scale_table, force=force)
-        updated |= super().update(force=force)
+        # update vr EntropyBottleneck with given scale, i.e. quantization step size
+        if isinstance(self.entropy_bottleneck, EntropyBottleneckVbr):
+            sc = scale
+            if sc is None:
+                rv = self.entropy_bottleneck.update(force=force)
+            else:
+                z_qstep = self.gayn2zqstep(1.0 / sc.view(1))
+                z_qstep = self.lower_bound_zqstep(z_qstep)
+                rv = self.entropy_bottleneck.update_variable(force=force, qs=z_qstep)
+        elif isinstance(self.entropy_bottleneck, EntropyBottleneck):
+            rv = self.entropy_bottleneck.update(force=force)
+        updated |= rv
         return updated

@@ -10,7 +10,7 @@ from utils.ckbd import *
 from modules.transform import *
 
 
-class MLICPlusPlus(CompressionModel):
+class MLICPlusPlus(CompressionModel, nn.Module):
     def __init__(self, config, **kwargs):
         super().__init__(config.N, **kwargs)
         N = config.N
@@ -90,7 +90,7 @@ class MLICPlusPlus(CompressionModel):
             z_likelihoods: [B, N, H // 64, W // 64]
             likelihoods: y_likelihoods, z_likelihoods
         """
-        self.update_resolutions(x.size(2) // 16, x.size(3) // 16)
+        self.update_resolutions(x.size(2) // 16, x.size(3) // 16, x.device)
         y = self.g_a(x)
         z = self.h_a(y)
         _, z_likelihoods = self.entropy_bottleneck(z)
@@ -184,17 +184,23 @@ class MLICPlusPlus(CompressionModel):
             "likelihoods": {"y_likelihoods": y_likelihoods, "z_likelihoods": z_likelihoods}
         }
 
-    def update_resolutions(self, H, W):
+    def update_resolutions(self, H, W, device=None):
+        if device is None:
+            for param in self.g_a.parameters():
+                if param.device is not None:
+                    device = param.device
+                print(device)
+                break
         for i in range(len(self.global_intra_context)):
             if i == 0:
-                self.local_context[i].update_resolution(H, W, next(self.parameters()).device, mask=None)
+                self.local_context[i].update_resolution(H, W, device, mask=None)
             else:
-                self.local_context[i].update_resolution(H, W, next(self.parameters()).device, mask=self.local_context[0].attn_mask)
+                self.local_context[i].update_resolution(H, W, device, mask=self.local_context[0].attn_mask)
 
     def compress(self, x):
         torch.cuda.synchronize()
         start_time = time.time()
-        self.update_resolutions(x.size(2) // 16, x.size(3) // 16)
+        self.update_resolutions(x.size(2) // 16, x.size(3) // 16, x.device)
         y = self.g_a(x)
         z = self.h_a(y)
         z_strings = self.entropy_bottleneck.compress(z)
