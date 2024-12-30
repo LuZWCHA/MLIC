@@ -10,6 +10,13 @@ def train_options():
         type=str,
         required=False,
         help="Experiment name"
+    ) 
+    parser.add_argument(
+        "-m",
+        "--model-name",
+        default="MLICPP_L",
+        type=str,
+        help="Model name"
     )
     parser.add_argument(
         "-d",

@@ -3,12 +3,17 @@ import numpy as np
 import PIL.Image as Image
 from typing import Dict, List, Optional, Tuple, Union
 from pytorch_msssim import ms_ssim
+from lpips import lpips
+from DISTS_pytorch import DISTS
 
+lp_fn = lpips.LPIPS(net="vgg")
+dists_fn = DISTS()
 
 def compute_metrics(
     a: Union[np.array, Image.Image],
     b: Union[np.array, Image.Image],
     max_val: float = 255.0,
+    device="cuda:0"
 ) -> Tuple[float, float]:
     """Returns PSNR and MS-SSIM between images `a` and `b`. """
     if isinstance(a, Image.Image):
@@ -26,4 +31,6 @@ def compute_metrics(
     mse = torch.mean((a - b) ** 2).item()
     p = 20 * np.log10(max_val) - 10 * np.log10(mse)
     m = ms_ssim(a, b, data_range=max_val).item()
-    return p, m
+    lpips_m = lp_fn.to(device).forward((a.to(device) / max_val * 2) -1, b.to(device) / max_val * 2 - 1).item()
+    dists = dists_fn.to(device).forward(a.to(device) / max_val, b.to(device) / max_val).item()
+    return p, m, lpips_m, dists

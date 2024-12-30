@@ -34,7 +34,7 @@ def main():
     logger_test = logging.getLogger('test')
 
     test_transforms = transforms.Compose([transforms.ToTensor()])
-    test_dataset = ImageFolder(args.dataset, split="tecnick", transform=test_transforms)
+    test_dataset = ImageFolder(args.dataset, split=".", transform=test_transforms)
     device = "cuda" if args.cuda and torch.cuda.is_available() else "cpu"
     test_dataloader = DataLoader(
         test_dataset,
@@ -48,9 +48,14 @@ def main():
 
     net = MLICPlusPlus(config=config)
     net = net.to(device)
-    checkpoint = torch.load(args.checkpoint)
-    net.load_state_dict(checkpoint['state_dict'])
-    epoch = checkpoint["epoch"]
+    if os.path.exists(args.checkpoint):
+        checkpoint = torch.load(args.checkpoint)
+        net.load_state_dict(checkpoint['state_dict'])
+        epoch = checkpoint["epoch"]
+    else:
+        epoch = 0
+        print("Checkpoint not found.")
+    
     logger_test.info(f"Start testing!" )
     save_dir = os.path.join('./experiments', args.experiment, 'codestream', '%02d' % (epoch + 1))
     if not os.path.exists(save_dir):

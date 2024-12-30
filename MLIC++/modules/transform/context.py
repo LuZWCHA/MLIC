@@ -4,7 +4,7 @@ import torch.nn.functional as F
 from torch.nn.init import trunc_normal_
 from einops import rearrange
 from modules.layers import MLP, build_position_index
-from modules.layers import conv, deconv
+from modules.layers import conv, deconv, conv1x1, conv3x3
 from utils.ckbd import *
 
 
@@ -116,11 +116,14 @@ class ChannelContext(nn.Module):
     def __init__(self, in_dim, out_dim) -> None:
         super().__init__()
         self.fushion = nn.Sequential(
-            nn.Conv2d(in_dim, 192, kernel_size=3, stride=1, padding=1),
+            # nn.Conv2d(in_dim, 192, kernel_size=3, stride=1, padding=1),
+            conv3x3(in_dim, 192),
             nn.GELU(),
-            nn.Conv2d(192, 128, kernel_size=3, stride=1, padding=1),
+            # nn.Conv2d(192, 128, kernel_size=3, stride=1, padding=1),
+            conv3x3(192, 128),
             nn.GELU(),
-            nn.Conv2d(128, out_dim * 4, kernel_size=3, stride=1, padding=1)
+            # nn.Conv2d(128, out_dim * 4, kernel_size=3, stride=1, padding=1),
+            conv3x3(128, out_dim * 4)
         )
 
     def forward(self, channel_params):
