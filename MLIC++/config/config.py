@@ -1,5 +1,19 @@
 import torch.nn as nn
 from utils.utils import Config
+import modules.layers.conv as conv
+
+def conv3x3(in_channels, out_channels, kernel_size=3, stride=1, padding=1, use_deep_wise_conv=True):
+    if use_deep_wise_conv:
+        return conv.DepthWiseConv(
+            in_channels,
+            out_channels,
+            kernel_size=kernel_size,
+            stride=stride,
+            padding=kernel_size // 2,
+        )
+    else:
+        return conv.conv3x3_old(in_channels, out_channels, stride=stride)
+
 
 # 2088.96 GMacs
 def model_config(model_name="MLICPP_S"):

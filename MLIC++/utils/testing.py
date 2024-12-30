@@ -152,10 +152,7 @@ from deepspeed.profiling.flops_profiler import get_model_profile
 torch.backends.cudnn.deterministic = True
 
 
-
 def get_macs(net):
-
-
     class MyModel(nn.Module):
 
         def __init__(self, net, *args, **kwargs):

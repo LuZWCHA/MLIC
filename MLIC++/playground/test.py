@@ -45,7 +45,7 @@ def main():
     )
 
     device = "cuda" if args.cuda and torch.cuda.is_available() else "cpu"
-
+    
     net = MLICPlusPlus(config=config)
     net = net.to(device)
     if os.path.exists(args.checkpoint):
