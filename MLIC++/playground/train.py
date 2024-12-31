@@ -92,7 +92,14 @@ def main():
     if args.checkpoint != None:
         checkpoint = torch.load(args.checkpoint)
         # new_ckpt = modify_checkpoint(checkpoint['state_dict'])
-        net.load_state_dict(checkpoint['state_dict'])
+        new_sd = dict()
+        for k, v in checkpoint['state_dict'].items():
+            k: str
+            while k.startswith("module."):
+                k = k[7:]
+            new_sd[k] = v
+        net.load_state_dict(new_sd)
+        # net.load_state_dict(checkpoint['state_dict'])
         optimizer.load_state_dict(checkpoint['optimizer'])
         aux_optimizer.load_state_dict(checkpoint['aux_optimizer'])
         # lr_scheduler.load_state_dict(checkpoint['lr_scheduler'])
@@ -109,7 +116,7 @@ def main():
         best_loss = 1e10
         current_step = 0
     if args.cuda and torch.cuda.device_count() > 1:
-        net = CustomDataParallel(net)
+        net = CustomDataParallel(net).to(device)
     # start_epoch = 0
     # best_loss = 1e10
     # current_step = 0
