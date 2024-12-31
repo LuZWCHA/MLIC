@@ -335,7 +335,183 @@ class MLICPlusPlus(CompressionModel):
                         y_hat_slices.append(y_hat_slice)
                         y_likelihoods.append(y_slice_likelihoods)
             else:
-                pass
+                y_slices = y.chunk(self.slice_num, dim=1)
+                y_hat_slices = []
+                y_likelihoods = []
+                for idx, y_slice in enumerate(y_slices):
+                    slice_anchor, slice_nonanchor = ckbd_split(y_slice)
+
+                    if idx == 0:
+                        # Anchor
+                        params_anchor = self.entropy_parameters_anchor[idx](hyper_params)
+                        scales_anchor, means_anchor = params_anchor.chunk(2, 1)
+                        # split means and scales of anchor
+                        scales_anchor = ckbd_anchor(scales_anchor)
+                        means_anchor = ckbd_anchor(means_anchor)
+                        # round anchor
+                        # slice_anchor = ste_round((slice_anchor - means_anchor) * scale) * rescale + means_anchor
+                        y_zm = slice_anchor - means_anchor
+                        y_zm_sc = y_zm * scale
+                        signs = torch.sign(y_zm_sc).detach()
+                        q_= ste_round(y_zm_sc)
+                        q_stdev = self.gaussian_conditional.lower_bound_scale(
+                            scales_anchor * scale
+                        )
+
+                        stdev_and_gain = torch.cat(
+                            (
+                                q_stdev.unsqueeze(dim=2),
+                                scale.detach().expand(q_stdev.unsqueeze(dim=2).shape),
+                            ),
+                            dim=2,
+                        )
+                        q_offsets = (-1) * (self.QuantABCD.forward(stdev_and_gain)).squeeze(
+                            dim=2
+                        )
+                        q_offsets[-0.0001 < q_ < 0.0001] = (
+                            0  # must use zero offset for locations quantized to zero
+                        )
+                        y_q = signs * (q_ + q_offsets)
+                        y_q = y_q * rescale + means_anchor
+                        slice_anchor = y_q
+
+                        # predict residuals cause by round
+                        lrp_anchor = self.lrp_anchor[idx](torch.cat(([hyper_means] + y_hat_slices + [slice_anchor]), dim=1))
+                        slice_anchor = slice_anchor + ckbd_anchor(lrp_anchor)
+
+                        # Non-anchor
+                        # local_ctx: [B, H, W, 2 * C]
+                        local_ctx = self.local_context[idx](slice_anchor)
+                        params_nonanchor = self.entropy_parameters_nonanchor[idx](torch.cat([local_ctx, hyper_params], dim=1))
+                        scales_nonanchor, means_nonanchor = params_nonanchor.chunk(2, 1)
+                        # split means and scales of nonanchor
+                        scales_nonanchor = ckbd_nonanchor(scales_nonanchor)
+                        means_nonanchor = ckbd_nonanchor(means_nonanchor)
+                        # merge means and scales of anchor and nonanchor
+                        scales_slice = ckbd_merge(scales_anchor, scales_nonanchor)
+                        means_slice = ckbd_merge(means_anchor, means_nonanchor)
+                        _, y_slice_likelihoods = self.gaussian_conditional(y_slice * scale, scales_slice * scale, means_slice)
+                        # round slice_nonanchor
+                        # slice_nonanchor = ste_round((slice_nonanchor - means_nonanchor) * scale) * rescale + means_nonanchor
+                        y_zm = slice_nonanchor - means_nonanchor
+                        y_zm_sc = y_zm * scale
+                        signs = torch.sign(y_zm_sc).detach()
+                        q_= ste_round(y_zm_sc)
+                        q_stdev = self.gaussian_conditional.lower_bound_scale(
+                            scales_anchor * scale
+                        )
+
+                        stdev_and_gain = torch.cat(
+                            (
+                                q_stdev.unsqueeze(dim=2),
+                                scale.detach().expand(q_stdev.unsqueeze(dim=2).shape),
+                            ),
+                            dim=2,
+                        )
+                        q_offsets = (-1) * (self.QuantABCD.forward(stdev_and_gain)).squeeze(
+                            dim=2
+                        )
+                        q_offsets[-0.0001 < q_ < 0.0001] = (
+                            0  # must use zero offset for locations quantized to zero
+                        )
+                        y_q = signs * (q_ + q_offsets)
+                        y_q = y_q * rescale + means_nonanchor                        
+                        slice_nonanchor = y_q
+
+                        y_hat_slice = slice_anchor + slice_nonanchor
+                        # predict residuals cause by round
+                        lrp_nonanchor = self.lrp_nonanchor[idx](torch.cat(([hyper_means] + y_hat_slices + [y_hat_slice]), dim=1))
+                        y_hat_slice = y_hat_slice + ckbd_nonanchor(lrp_nonanchor)
+                        y_hat_slices.append(y_hat_slice)
+                        y_likelihoods.append(y_slice_likelihoods)
+
+                    else:
+                        global_inter_ctx = self.global_inter_context[idx](torch.cat(y_hat_slices, dim=1))
+                        channel_ctx = self.channel_context[idx](torch.cat(y_hat_slices, dim=1))
+                        # Anchor(Use channel context and hyper params)
+                        params_anchor = self.entropy_parameters_anchor[idx](torch.cat([global_inter_ctx, channel_ctx, hyper_params], dim=1))
+                        scales_anchor, means_anchor = params_anchor.chunk(2, 1)
+                        # split means and scales of anchor
+                        scales_anchor = ckbd_anchor(scales_anchor)
+                        means_anchor = ckbd_anchor(means_anchor)
+                        # round anchor
+                        # slice_anchor = ste_round((slice_anchor - means_anchor) * scale) * rescale + means_anchor
+                        y_zm = slice_anchor - means_anchor
+                        y_zm_sc = y_zm * scale
+                        signs = torch.sign(y_zm_sc).detach()
+                        q_= ste_round(y_zm_sc)
+                        q_stdev = self.gaussian_conditional.lower_bound_scale(
+                            scales_anchor * scale
+                        )
+
+                        stdev_and_gain = torch.cat(
+                            (
+                                q_stdev.unsqueeze(dim=2),
+                                scale.detach().expand(q_stdev.unsqueeze(dim=2).shape),
+                            ),
+                            dim=2,
+                        )
+                        q_offsets = (-1) * (self.QuantABCD.forward(stdev_and_gain)).squeeze(
+                            dim=2
+                        )
+                        q_offsets[-0.0001 < q_ < 0.0001] = (
+                            0  # must use zero offset for locations quantized to zero
+                        )
+                        y_q = signs * (q_ + q_offsets)
+                        y_q = y_q * rescale + means_anchor
+                        slice_anchor = y_q
+                        # predict residuals cause by round
+                        lrp_anchor = self.lrp_anchor[idx](torch.cat(([hyper_means] + y_hat_slices + [slice_anchor]), dim=1))
+                        slice_anchor = slice_anchor + ckbd_anchor(lrp_anchor)
+                        # Non-anchor(Use spatial context, channel context and hyper params)
+                        global_intra_ctx = self.global_intra_context[idx](y_hat_slices[-1], slice_anchor)
+                        # ctx_params: [B, H, W, 2 * C]
+                        local_ctx = self.local_context[idx](slice_anchor)
+                        params_nonanchor = self.entropy_parameters_nonanchor[idx](torch.cat([local_ctx, global_intra_ctx, global_inter_ctx, channel_ctx, hyper_params], dim=1))
+                        scales_nonanchor, means_nonanchor = params_nonanchor.chunk(2, 1)
+                        # split means and scales of nonanchor
+                        scales_nonanchor = ckbd_nonanchor(scales_nonanchor)
+                        means_nonanchor = ckbd_nonanchor(means_nonanchor)
+                        # merge means and scales of anchor and nonanchor
+                        scales_slice = ckbd_merge(scales_anchor, scales_nonanchor)
+                        means_slice = ckbd_merge(means_anchor, means_nonanchor)
+                        _, y_slice_likelihoods = self.gaussian_conditional(y_slice * scale, scales_slice * scale, means_slice)
+                        # round slice_nonanchor
+                        # slice_nonanchor = ste_round((slice_nonanchor - means_nonanchor) * scale) * rescale + means_nonanchor
+                        y_zm = slice_nonanchor - means_nonanchor
+                        y_zm_sc = y_zm * scale
+                        signs = torch.sign(y_zm_sc).detach()
+                        q_= ste_round(y_zm_sc)
+                        q_stdev = self.gaussian_conditional.lower_bound_scale(
+                            scales_anchor * scale
+                        )
+
+                        stdev_and_gain = torch.cat(
+                            (
+                                q_stdev.unsqueeze(dim=2),
+                                scale.detach().expand(q_stdev.unsqueeze(dim=2).shape),
+                            ),
+                            dim=2,
+                        )
+                        q_offsets = (-1) * (self.QuantABCD.forward(stdev_and_gain)).squeeze(
+                            dim=2
+                        )
+                        q_offsets[-0.0001 < q_ < 0.0001] = (
+                            0  # must use zero offset for locations quantized to zero
+                        )
+                        y_q = signs * (q_ + q_offsets)
+                        y_q = y_q * rescale + means_nonanchor                        
+                        slice_nonanchor = y_q
+                        y_hat_slice = slice_anchor + slice_nonanchor
+                        # predict residuals cause by round
+                        lrp_nonanchor = self.lrp_nonanchor[idx](torch.cat(([hyper_means] + y_hat_slices + [y_hat_slice]), dim=1))
+                        y_hat_slice = y_hat_slice + ckbd_nonanchor(lrp_nonanchor)
+                        y_hat_slices.append(y_hat_slice)
+                        y_likelihoods.append(y_slice_likelihoods)
+            
+        y_hat = torch.cat(y_hat_slices, dim=1)
+        y_likelihoods = torch.cat(y_likelihoods, dim=1)
+        x_hat = self.g_s(y_hat)
 
         return {
             "x_hat": x_hat,

@@ -20,11 +20,24 @@ def test_one_epoch(epoch, test_dataloader, model, criterion, save_dir, logger_va
     psnr = AverageMeter()
     lpips_loss = AverageMeter()
     ms_ssim = AverageMeter()
+    avg_dists = AverageMeter()
 
     with torch.no_grad():
         for i, d in enumerate(test_dataloader):
             d = d.to(device)
-            out_net = model(d)
+            B, C, H, W = d.shape
+
+            pad_h = 0
+            pad_w = 0
+            if H % 64 != 0:
+                pad_h = 64 * (H // 64 + 1) - H
+            if W % 64 != 0:
+                pad_w = 64 * (W // 64 + 1) - W
+
+            img_pad = F.pad(d, (0, pad_w, 0, pad_h), mode='constant', value=0)
+    
+            out_net = model(img_pad)
+            out_net['x_hat'] = out_net['x_hat'][:, :, :H, :W]
             out_criterion = criterion(out_net, d)
 
             aux_loss.update(model.aux_loss())
@@ -37,9 +50,12 @@ def test_one_epoch(epoch, test_dataloader, model, criterion, save_dir, logger_va
 
             rec = torch2img(out_net['x_hat'])
             img = torch2img(d)
-            p, m = compute_metrics(rec, img)
+            p, m, lpips_m, dists = compute_metrics(rec, img)
             psnr.update(p)
             ms_ssim.update(m)
+            lpips_loss.update(lpips_m)
+            avg_dists.update(dists)
+            # lpips_loss.update(lpips_m)
 
             if not os.path.exists(save_dir):
                 os.makedirs(save_dir)
@@ -50,12 +66,16 @@ def test_one_epoch(epoch, test_dataloader, model, criterion, save_dir, logger_va
     tb_logger.add_scalar('{}'.format('[val]: bpp_loss'), bpp_loss.avg, epoch + 1)
     tb_logger.add_scalar('{}'.format('[val]: psnr'), psnr.avg, epoch + 1)
     tb_logger.add_scalar('{}'.format('[val]: ms-ssim'), ms_ssim.avg, epoch + 1)
+    tb_logger.add_scalar('{}'.format('[val]: lpips'), lpips_loss.avg, epoch + 1)
+    tb_logger.add_scalar('{}'.format('[val]: dists'), avg_dists.avg, epoch + 1)
 
     if out_criterion["mse_loss"] is not None:
         logger_val.info(
             f"Test epoch {epoch}: Average losses: "
             f"Loss: {loss.avg:.4f} | "
             f"MSE loss: {mse_loss.avg:.6f} | "
+            f"LPISP loss: {lpips_loss.avg:.6f} | "
+            f"DISTS loss: {avg_dists.avg:.6f} | "
             f"Bpp loss: {bpp_loss.avg:.4f} | "
             f"Aux loss: {aux_loss.avg:.2f} | "
             f"PSNR: {psnr.avg:.6f} | "
@@ -67,6 +87,8 @@ def test_one_epoch(epoch, test_dataloader, model, criterion, save_dir, logger_va
             f"Test epoch {epoch}: Average losses: "
             f"Loss: {loss.avg:.4f} | "
             f"MS-SSIM loss: {ms_ssim_loss.avg:.6f} | "
+            f"LPISP loss: {lpips_loss.avg:.6f} | "
+            f"DISTS loss: {avg_dists.avg:.6f} | "
             f"Bpp loss: {bpp_loss.avg:.4f} | "
             f"Aux loss: {aux_loss.avg:.2f} | "
             f"PSNR: {psnr.avg:.6f} | "
