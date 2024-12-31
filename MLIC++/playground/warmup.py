@@ -63,7 +63,7 @@ def main():
         [transforms.ToTensor()]
     )
 
-    train_dataset = ImageFolder(args.dataset, split="train", transform=train_transforms)
+    train_dataset = ImageFolder(args.dataset, split="train/openimagev7/testset", transform=train_transforms)
     test_dataset = ImageFolder(args.dataset, split="test", transform=test_transforms)
 
     train_dataloader = DataLoader(

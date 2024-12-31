@@ -19,7 +19,7 @@ def conv(in_channels, out_channels, kernel_size=5, stride=2):
         padding=kernel_size // 2,
     )
 
-def conv3x3(in_channels, out_channels, kernel_size=3, stride=1, padding=1, use_deep_wise_conv=True):
+def conv3x3(in_channels, out_channels, kernel_size=3, stride=1, padding=1, use_deep_wise_conv=False):
     if use_deep_wise_conv:
         return DepthWiseConv(
             in_channels,

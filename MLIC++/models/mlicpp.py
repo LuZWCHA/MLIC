@@ -10,7 +10,7 @@ from utils.ckbd import *
 from modules.transform import *
 
 
-class MLICPlusPlus(CompressionModel, nn.Module):
+class MLICPlusPlus(CompressionModel):
     def __init__(self, config, **kwargs):
         super().__init__(config.N, **kwargs)
         N = config.N
@@ -27,7 +27,7 @@ class MLICPlusPlus(CompressionModel, nn.Module):
         self.slice_ch = slice_ch
 
         self.g_a = AnalysisTransform(N=N, M=M)
-        self.g_s = SynthesisTransform(N=N, M=M)
+        self.g_s = SynthesisTransformOld(N=N, M=M)
 
         self.h_a = HyperAnalysis(M=M, N=N)
         self.h_s = HyperSynthesis(M=M, N=N)
@@ -67,11 +67,11 @@ class MLICPlusPlus(CompressionModel, nn.Module):
 
         # Latent Residual Prediction
         self.lrp_anchor = nn.ModuleList(
-            LatentResidualPrediction(in_dim=M + (i + 1) * slice_ch, out_dim=slice_ch)
+            LatentResidualPredictionOld(in_dim=M + (i + 1) * slice_ch, out_dim=slice_ch)
             for i in range(slice_num)
         )
         self.lrp_nonanchor = nn.ModuleList(
-            LatentResidualPrediction(in_dim=M + (i + 1) * slice_ch, out_dim=slice_ch)
+            LatentResidualPredictionOld(in_dim=M + (i + 1) * slice_ch, out_dim=slice_ch)
             for i in range(slice_num)
         )
 

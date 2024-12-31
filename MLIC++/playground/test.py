@@ -21,7 +21,7 @@ def main():
     Image.MAX_IMAGE_PIXELS = None
 
     args = test_options()
-    config = model_config()
+    config = model_config("MLICPP_L")
 
     # os.environ['CUDA_VISIBLE_DEVICES'] = str(args.gpu_id)
 
