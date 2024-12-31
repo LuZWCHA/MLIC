@@ -151,6 +151,13 @@ def test_options():
         type=str,
         required=False,
         help="Training dataset"
+    ) 
+    parser.add_argument(
+        "-m",
+        "--model-name",
+        default="MLICPP_L",
+        type=str,
+        help="Model name"
     )
     parser.add_argument(
         "-n",

@@ -83,8 +83,7 @@ def main():
     )
 
     net = MLICPlusPlus(config=config)
-    if args.cuda and torch.cuda.device_count() > 1:
-        net = CustomDataParallel(net)
+    
     net = net.to(device)
     optimizer, aux_optimizer = configure_optimizers(net, args)
     lr_scheduler = optim.lr_scheduler.MultiStepLR(optimizer, milestones=[80, 100], gamma=0.1)
@@ -109,7 +108,8 @@ def main():
         start_epoch = 0
         best_loss = 1e10
         current_step = 0
-
+    if args.cuda and torch.cuda.device_count() > 1:
+        net = CustomDataParallel(net)
     # start_epoch = 0
     # best_loss = 1e10
     # current_step = 0
@@ -148,7 +148,7 @@ def main():
             save_checkpoint(
                 {
                     "epoch": epoch + 1,
-                    "state_dict": net.state_dict(),
+                    "state_dict": net.module.state_dict() if isinstance(net, CustomDataParallel) else net.state_dict(),
                     "loss": loss,
                     "optimizer": optimizer.state_dict(),
                     "aux_optimizer": aux_optimizer.state_dict(),

@@ -21,7 +21,7 @@ def main():
     Image.MAX_IMAGE_PIXELS = None
 
     args = test_options()
-    config = model_config("MLICPP_L")
+    config = model_config(args.model_name)
 
     # os.environ['CUDA_VISIBLE_DEVICES'] = str(args.gpu_id)
 
@@ -50,7 +50,13 @@ def main():
     net = net.to(device)
     if os.path.exists(args.checkpoint):
         checkpoint = torch.load(args.checkpoint)
-        net.load_state_dict(checkpoint['state_dict'])
+        new_sd = dict()
+        for k, v in checkpoint['state_dict'].items():
+            k: str
+            while k.startswith("module."):
+                k = k[7:]
+            new_sd[k] = v
+        net.load_state_dict(new_sd)
         epoch = checkpoint["epoch"]
     else:
         epoch = 0
