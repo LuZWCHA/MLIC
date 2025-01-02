@@ -11,7 +11,7 @@ from modules.transform import *
 from compressai.entropy_models import EntropyBottleneck, EntropyBottleneckVbr
 
 
-class MLICPlusPlus(CompressionModel):
+class MLICPlusPlusVbr(CompressionModel):
     def __init__(self, config, vr_entbttlnck=None, **kwargs):
         super().__init__(config.N, **kwargs)
         N = config.N
@@ -80,12 +80,12 @@ class MLICPlusPlus(CompressionModel):
         ###################################################### VBR modules ####################################################
 
         # lambdas to use during training
-        self.lmbda = [0.0018, 0.0035, 0.0067, 0.0130, 0.025, 0.0483, 0.0932, 0.18]
+        self.lmbda = [0.0005, 0.001, 0.0018, 0.0035, 0.0067, 0.0130, 0.025, 0.0483, 0.0932, 0.18]
         self.levels = len(self.lmbda)
         # gain: inverse of quantization step size
         self.Gain = torch.nn.Parameter(
             torch.tensor(
-                [0.10000, 0.13944, 0.19293, 0.26874, 0.37268, 0.51801, 0.71957, 1.00000]
+                [0.06556, 0.08333, 0.10000, 0.13944, 0.19293, 0.26874, 0.37268, 0.51801, 0.71957, 1.00000]
             ),
             requires_grad=True,
         )
@@ -99,7 +99,7 @@ class MLICPlusPlus(CompressionModel):
             nn.Linear(Nds, 1),
         )
         # flag to indicate whether to use or not to use quantization offsets
-        self.no_quantoffset = False
+        self.no_quantoffset = True
         # use also variable rate hyper prior z (entropy_bottleneck)
         self.vr_entbttlnck = vr_entbttlnck
         if self.vr_entbttlnck:
@@ -289,7 +289,7 @@ class MLICPlusPlus(CompressionModel):
                         # merge means and scales of anchor and nonanchor
                         scales_slice = ckbd_merge(scales_anchor, scales_nonanchor)
                         means_slice = ckbd_merge(means_anchor, means_nonanchor)
-                        _, y_slice_likelihoods = self.gaussian_conditional(y_slice * scale, scales_slice * scale, means_slice)
+                        _, y_slice_likelihoods = self.gaussian_conditional(y_slice * scale, scales_slice * scale, means_slice * scale)
                         # round slice_nonanchor
                         slice_nonanchor = ste_round((slice_nonanchor - means_nonanchor) * scale) * rescale + means_nonanchor
                         y_hat_slice = slice_anchor + slice_nonanchor
@@ -325,7 +325,7 @@ class MLICPlusPlus(CompressionModel):
                         # merge means and scales of anchor and nonanchor
                         scales_slice = ckbd_merge(scales_anchor, scales_nonanchor)
                         means_slice = ckbd_merge(means_anchor, means_nonanchor)
-                        _, y_slice_likelihoods = self.gaussian_conditional(y_slice * scale, scales_slice * scale, means_slice)
+                        _, y_slice_likelihoods = self.gaussian_conditional(y_slice * scale, scales_slice * scale, means_slice * scale)
                         # round slice_nonanchor
                         slice_nonanchor = ste_round((slice_nonanchor - means_nonanchor) * scale) * rescale + means_nonanchor
                         y_hat_slice = slice_anchor + slice_nonanchor
@@ -475,7 +475,7 @@ class MLICPlusPlus(CompressionModel):
                         # merge means and scales of anchor and nonanchor
                         scales_slice = ckbd_merge(scales_anchor, scales_nonanchor)
                         means_slice = ckbd_merge(means_anchor, means_nonanchor)
-                        _, y_slice_likelihoods = self.gaussian_conditional(y_slice * scale, scales_slice * scale, means_slice)
+                        _, y_slice_likelihoods = self.gaussian_conditional(y_slice * scale, scales_slice * scale, means_slice * scale)
                         # round slice_nonanchor
                         # slice_nonanchor = ste_round((slice_nonanchor - means_nonanchor) * scale) * rescale + means_nonanchor
                         y_zm = slice_nonanchor - means_nonanchor
@@ -526,17 +526,37 @@ class MLICPlusPlus(CompressionModel):
                 self.local_context[i].update_resolution(H, W, next(self.parameters()).device, mask=self.local_context[0].attn_mask)
 
 
-
-    def compress(self, x):
-        torch.cuda.synchronize()
+    def compress(self, x, stage: int = 2, s: int = 1, inputscale=0):
         start_time = time.time()
+        if inputscale != 0:
+            scale = inputscale
+        else:
+            assert s in range(
+                0, self.levels
+            ), f"s should in range(0, {self.levels}), but get s:{s}"
+            scale = torch.abs(self.Gain[s])
+        rescale = torch.tensor(1.0) / scale
+
         self.update_resolutions(x.size(2) // 16, x.size(3) // 16)
         y = self.g_a(x)
         z = self.h_a(y)
-        z_strings = self.entropy_bottleneck.compress(z)
-        z_hat = self.entropy_bottleneck.decompress(z_strings, z.size()[-2:])
+
+        if stage == 1 or (stage == 2 and not self.vr_entbttlnck):
+            z_strings = self.entropy_bottleneck.compress(z)
+            z_hat = self.entropy_bottleneck.decompress(z_strings, z.size()[-2:])
+        elif stage == 2:  # support vr EntropyBottleneck
+            z_qstep = self.gayn2zqstep(1.0 / scale.view(1))
+            z_qstep = self.lower_bound_zqstep(z_qstep)
+            z_strings = self.entropy_bottleneck.compress(z, qs=z_qstep[0])
+            z_hat = self.entropy_bottleneck.decompress(
+                z_strings, z.size()[-2:], qs=z_qstep[0]
+            )
+        else:
+            self._raise_stage_error(self, stage)
+
         hyper_params = self.h_s(z_hat)
         hyper_scales, hyper_means = hyper_params.chunk(2, 1)
+
         y_slices = y.chunk(self.slice_num, dim=1)
         y_hat_slices = []
 
@@ -548,64 +568,121 @@ class MLICPlusPlus(CompressionModel):
         indexes_list = []
         y_strings = []
 
+
         for idx, y_slice in enumerate(y_slices):
             slice_anchor, slice_nonanchor = ckbd_split(y_slice)
-            if idx == 0:
-                # Anchor
-                params_anchor = self.entropy_parameters_anchor[idx](hyper_params)
-                scales_anchor, means_anchor = params_anchor.chunk(2, 1)
-                # split means and scales of anchor
-                scales_anchor = ckbd_anchor(scales_anchor)
-                means_anchor = ckbd_anchor(means_anchor)
-                # round and compress anchor
-                slice_anchor = compress_anchor(self.gaussian_conditional, slice_anchor, scales_anchor, means_anchor, symbols_list, indexes_list)
-                # predict residuals caused by round
-                lrp_anchor = self.lrp_anchor[idx](torch.cat(([hyper_means] + y_hat_slices + [slice_anchor]), dim=1))
-                slice_anchor = slice_anchor + ckbd_anchor(lrp_anchor)
-                # Non-anchor
-                # local_ctx: [B,2 * C, H, W]
-                local_ctx = self.local_context[idx](slice_anchor)
-                params_nonanchor = self.entropy_parameters_nonanchor[idx](torch.cat([local_ctx, hyper_params], dim=1))
-                scales_nonanchor, means_nonanchor = params_nonanchor.chunk(2, 1)
-                # split means and scales of nonanchor
-                scales_nonanchor = ckbd_nonanchor(scales_nonanchor)
-                means_nonanchor = ckbd_nonanchor(means_nonanchor)
-                # round and compress nonanchor
-                slice_nonanchor = compress_nonanchor(self.gaussian_conditional, slice_nonanchor, scales_nonanchor, means_nonanchor, symbols_list, indexes_list)
-                # predict residuals caused by round
-                lrp_nonanchor = self.lrp_nonanchor[idx](torch.cat(([hyper_means] + y_hat_slices + [slice_nonanchor + slice_anchor]), dim=1))
-                slice_nonanchor = slice_nonanchor + ckbd_nonanchor(lrp_nonanchor)
-                y_hat_slices.append(slice_nonanchor + slice_anchor)
-
-            else:
-                # Anchor
-                global_inter_ctx = self.global_inter_context[idx](torch.cat(y_hat_slices, dim=1))
-                channel_ctx = self.channel_context[idx](torch.cat(y_hat_slices, dim=1))
-                params_anchor = self.entropy_parameters_anchor[idx](torch.cat([global_inter_ctx, channel_ctx, hyper_params], dim=1))
-                scales_anchor, means_anchor = params_anchor.chunk(2, 1)
-                # split means and scales of anchor
-                scales_anchor = ckbd_anchor(scales_anchor)
-                means_anchor = ckbd_anchor(means_anchor)
-                # round and compress anchor
-                slice_anchor = compress_anchor(self.gaussian_conditional, slice_anchor, scales_anchor, means_anchor, symbols_list, indexes_list)
-                # predict residuals caused by round
-                lrp_anchor = self.lrp_anchor[idx](torch.cat(([hyper_means] + y_hat_slices + [slice_anchor]), dim=1))
-                slice_anchor = slice_anchor + ckbd_anchor(lrp_anchor)
-                # Non-anchor
-                global_intra_ctx = self.global_intra_context[idx](y_hat_slices[-1], slice_anchor)
-                # local_ctx: [B,2 * C, H, W]
-                local_ctx = self.local_context[idx](slice_anchor)
-                params_nonanchor = self.entropy_parameters_nonanchor[idx](torch.cat([local_ctx, global_intra_ctx, global_inter_ctx, channel_ctx, hyper_params], dim=1))
-                scales_nonanchor, means_nonanchor = params_nonanchor.chunk(2, 1)
-                # split means and scales of nonanchor
-                scales_nonanchor = ckbd_nonanchor(scales_nonanchor)
-                means_nonanchor = ckbd_nonanchor(means_nonanchor)
-                # round and compress nonanchor
-                slice_nonanchor = compress_nonanchor(self.gaussian_conditional, slice_nonanchor, scales_nonanchor, means_nonanchor, symbols_list, indexes_list)
-                # predict residuals caused by round
-                lrp_nonanchor = self.lrp_nonanchor[idx](torch.cat(([hyper_means] + y_hat_slices + [slice_nonanchor + slice_anchor]), dim=1))
-                slice_nonanchor = slice_nonanchor + ckbd_nonanchor(lrp_nonanchor)
-                y_hat_slices.append(slice_nonanchor + slice_anchor)
+            if stage == 1:
+                if idx == 0:
+                    # Anchor
+                    params_anchor = self.entropy_parameters_anchor[idx](hyper_params)
+                    scales_anchor, means_anchor = params_anchor.chunk(2, 1)
+                    # split means and scales of anchor
+                    scales_anchor = ckbd_anchor(scales_anchor)
+                    means_anchor = ckbd_anchor(means_anchor)
+                    # round and compress anchor
+                    slice_anchor = compress_anchor(self.gaussian_conditional, slice_anchor, scales_anchor, means_anchor, symbols_list, indexes_list)
+                    # predict residuals caused by round
+                    lrp_anchor = self.lrp_anchor[idx](torch.cat(([hyper_means] + y_hat_slices + [slice_anchor]), dim=1))
+                    slice_anchor = slice_anchor + ckbd_anchor(lrp_anchor)
+                    # Non-anchor
+                    # local_ctx: [B,2 * C, H, W]
+                    local_ctx = self.local_context[idx](slice_anchor)
+                    params_nonanchor = self.entropy_parameters_nonanchor[idx](torch.cat([local_ctx, hyper_params], dim=1))
+                    scales_nonanchor, means_nonanchor = params_nonanchor.chunk(2, 1)
+                    # split means and scales of nonanchor
+                    scales_nonanchor = ckbd_nonanchor(scales_nonanchor)
+                    means_nonanchor = ckbd_nonanchor(means_nonanchor)
+                    # round and compress nonanchor
+                    slice_nonanchor = compress_nonanchor(self.gaussian_conditional, slice_nonanchor, scales_nonanchor, means_nonanchor, symbols_list, indexes_list)
+                    # predict residuals caused by round
+                    lrp_nonanchor = self.lrp_nonanchor[idx](torch.cat(([hyper_means] + y_hat_slices + [slice_nonanchor + slice_anchor]), dim=1))
+                    slice_nonanchor = slice_nonanchor + ckbd_nonanchor(lrp_nonanchor)
+                    y_hat_slices.append(slice_nonanchor + slice_anchor)
+                else:
+                    # Anchor
+                    global_inter_ctx = self.global_inter_context[idx](torch.cat(y_hat_slices, dim=1))
+                    channel_ctx = self.channel_context[idx](torch.cat(y_hat_slices, dim=1))
+                    params_anchor = self.entropy_parameters_anchor[idx](torch.cat([global_inter_ctx, channel_ctx, hyper_params], dim=1))
+                    scales_anchor, means_anchor = params_anchor.chunk(2, 1)
+                    # split means and scales of anchor
+                    scales_anchor = ckbd_anchor(scales_anchor)
+                    means_anchor = ckbd_anchor(means_anchor)
+                    # round and compress anchor
+                    slice_anchor = compress_anchor(self.gaussian_conditional, slice_anchor, scales_anchor, means_anchor, symbols_list, indexes_list)
+                    # predict residuals caused by round
+                    lrp_anchor = self.lrp_anchor[idx](torch.cat(([hyper_means] + y_hat_slices + [slice_anchor]), dim=1))
+                    slice_anchor = slice_anchor + ckbd_anchor(lrp_anchor)
+                    # Non-anchor
+                    global_intra_ctx = self.global_intra_context[idx](y_hat_slices[-1], slice_anchor)
+                    # local_ctx: [B,2 * C, H, W]
+                    local_ctx = self.local_context[idx](slice_anchor)
+                    params_nonanchor = self.entropy_parameters_nonanchor[idx](torch.cat([local_ctx, global_intra_ctx, global_inter_ctx, channel_ctx, hyper_params], dim=1))
+                    scales_nonanchor, means_nonanchor = params_nonanchor.chunk(2, 1)
+                    # split means and scales of nonanchor
+                    scales_nonanchor = ckbd_nonanchor(scales_nonanchor)
+                    means_nonanchor = ckbd_nonanchor(means_nonanchor)
+                    # round and compress nonanchor
+                    slice_nonanchor = compress_nonanchor(self.gaussian_conditional, slice_nonanchor, scales_nonanchor, means_nonanchor, symbols_list, indexes_list)
+                    # predict residuals caused by round
+                    lrp_nonanchor = self.lrp_nonanchor[idx](torch.cat(([hyper_means] + y_hat_slices + [slice_nonanchor + slice_anchor]), dim=1))
+                    slice_nonanchor = slice_nonanchor + ckbd_nonanchor(lrp_nonanchor)
+                    y_hat_slices.append(slice_nonanchor + slice_anchor)
+            elif stage == 2:
+                if idx == 0:
+                    # Anchor
+                    params_anchor = self.entropy_parameters_anchor[idx](hyper_params)
+                    scales_anchor, means_anchor = params_anchor.chunk(2, 1)
+                    # split means and scales of anchor
+                    scales_anchor = ckbd_anchor(scales_anchor)
+                    means_anchor = ckbd_anchor(means_anchor)
+                    # round and compress anchor
+                    slice_anchor = compress_anchor_vbr(self.gaussian_conditional, self.QuantABCD, slice_anchor, scales_anchor, means_anchor, symbols_list, indexes_list, scale, rescale, self.no_quantoffset)
+                    # predict residuals caused by round
+                    lrp_anchor = self.lrp_anchor[idx](torch.cat(([hyper_means] + y_hat_slices + [slice_anchor]), dim=1))
+                    slice_anchor = slice_anchor + ckbd_anchor(lrp_anchor)
+                    # Non-anchor
+                    # local_ctx: [B,2 * C, H, W]
+                    local_ctx = self.local_context[idx](slice_anchor)
+                    params_nonanchor = self.entropy_parameters_nonanchor[idx](torch.cat([local_ctx, hyper_params], dim=1))
+                    scales_nonanchor, means_nonanchor = params_nonanchor.chunk(2, 1)
+                    # split means and scales of nonanchor
+                    scales_nonanchor = ckbd_nonanchor(scales_nonanchor)
+                    means_nonanchor = ckbd_nonanchor(means_nonanchor)
+                    # round and compress nonanchor
+                    slice_nonanchor = compress_nonanchor_vbr(self.gaussian_conditional, self.QuantABCD, slice_nonanchor, scales_nonanchor, means_nonanchor, symbols_list, indexes_list, scale, rescale, self.no_quantoffset)
+                    # predict residuals caused by round
+                    lrp_nonanchor = self.lrp_nonanchor[idx](torch.cat(([hyper_means] + y_hat_slices + [slice_nonanchor + slice_anchor]), dim=1))
+                    slice_nonanchor = slice_nonanchor + ckbd_nonanchor(lrp_nonanchor)
+                    y_hat_slices.append(slice_nonanchor + slice_anchor)
+                else:
+                    # Anchor
+                    global_inter_ctx = self.global_inter_context[idx](torch.cat(y_hat_slices, dim=1))
+                    channel_ctx = self.channel_context[idx](torch.cat(y_hat_slices, dim=1))
+                    params_anchor = self.entropy_parameters_anchor[idx](torch.cat([global_inter_ctx, channel_ctx, hyper_params], dim=1))
+                    scales_anchor, means_anchor = params_anchor.chunk(2, 1)
+                    # split means and scales of anchor
+                    scales_anchor = ckbd_anchor(scales_anchor)
+                    means_anchor = ckbd_anchor(means_anchor)
+                    # round and compress anchor
+                    slice_anchor = compress_anchor_vbr(self.gaussian_conditional, self.QuantABCD, slice_anchor, scales_anchor, means_anchor, symbols_list, indexes_list, scale, rescale, self.no_quantoffset)
+                    # predict residuals caused by round
+                    lrp_anchor = self.lrp_anchor[idx](torch.cat(([hyper_means] + y_hat_slices + [slice_anchor]), dim=1))
+                    slice_anchor = slice_anchor + ckbd_anchor(lrp_anchor)
+                    # Non-anchor
+                    global_intra_ctx = self.global_intra_context[idx](y_hat_slices[-1], slice_anchor)
+                    # local_ctx: [B,2 * C, H, W]
+                    local_ctx = self.local_context[idx](slice_anchor)
+                    params_nonanchor = self.entropy_parameters_nonanchor[idx](torch.cat([local_ctx, global_intra_ctx, global_inter_ctx, channel_ctx, hyper_params], dim=1))
+                    scales_nonanchor, means_nonanchor = params_nonanchor.chunk(2, 1)
+                    # split means and scales of nonanchor
+                    scales_nonanchor = ckbd_nonanchor(scales_nonanchor)
+                    means_nonanchor = ckbd_nonanchor(means_nonanchor)
+                    # round and compress nonanchor
+                    slice_nonanchor = compress_nonanchor_vbr(self.gaussian_conditional, self.QuantABCD, slice_nonanchor, scales_nonanchor, means_nonanchor, symbols_list, indexes_list, scale, rescale, self.no_quantoffset)
+                    # predict residuals caused by round
+                    lrp_nonanchor = self.lrp_nonanchor[idx](torch.cat(([hyper_means] + y_hat_slices + [slice_nonanchor + slice_anchor]), dim=1))
+                    slice_nonanchor = slice_nonanchor + ckbd_nonanchor(lrp_nonanchor)
+                    y_hat_slices.append(slice_nonanchor + slice_anchor)
 
         encoder.encode_with_indexes(symbols_list, indexes_list, cdf, cdf_lengths, offsets)
         y_string = encoder.flush()
@@ -620,9 +697,203 @@ class MLICPlusPlus(CompressionModel):
             "cost_time": cost_time
         }
 
-    def decompress(self, strings, shape):
+
+
+    # def compress(self, x):
+    #     torch.cuda.synchronize()
+    #     start_time = time.time()
+    #     self.update_resolutions(x.size(2) // 16, x.size(3) // 16)
+    #     y = self.g_a(x)
+    #     z = self.h_a(y)
+    #     z_strings = self.entropy_bottleneck.compress(z)
+    #     z_hat = self.entropy_bottleneck.decompress(z_strings, z.size()[-2:])
+    #     hyper_params = self.h_s(z_hat)
+    #     hyper_scales, hyper_means = hyper_params.chunk(2, 1)
+    #     y_slices = y.chunk(self.slice_num, dim=1)
+    #     y_hat_slices = []
+
+    #     cdf = self.gaussian_conditional.quantized_cdf.tolist()
+    #     cdf_lengths = self.gaussian_conditional.cdf_length.reshape(-1).int().tolist()
+    #     offsets = self.gaussian_conditional.offset.reshape(-1).int().tolist()
+    #     encoder = BufferedRansEncoder()
+    #     symbols_list = []
+    #     indexes_list = []
+    #     y_strings = []
+
+    #     for idx, y_slice in enumerate(y_slices):
+    #         slice_anchor, slice_nonanchor = ckbd_split(y_slice)
+    #         if idx == 0:
+    #             # Anchor
+    #             params_anchor = self.entropy_parameters_anchor[idx](hyper_params)
+    #             scales_anchor, means_anchor = params_anchor.chunk(2, 1)
+    #             # split means and scales of anchor
+    #             scales_anchor = ckbd_anchor(scales_anchor)
+    #             means_anchor = ckbd_anchor(means_anchor)
+    #             # round and compress anchor
+    #             slice_anchor = compress_anchor(self.gaussian_conditional, slice_anchor, scales_anchor, means_anchor, symbols_list, indexes_list)
+    #             # predict residuals caused by round
+    #             lrp_anchor = self.lrp_anchor[idx](torch.cat(([hyper_means] + y_hat_slices + [slice_anchor]), dim=1))
+    #             slice_anchor = slice_anchor + ckbd_anchor(lrp_anchor)
+    #             # Non-anchor
+    #             # local_ctx: [B,2 * C, H, W]
+    #             local_ctx = self.local_context[idx](slice_anchor)
+    #             params_nonanchor = self.entropy_parameters_nonanchor[idx](torch.cat([local_ctx, hyper_params], dim=1))
+    #             scales_nonanchor, means_nonanchor = params_nonanchor.chunk(2, 1)
+    #             # split means and scales of nonanchor
+    #             scales_nonanchor = ckbd_nonanchor(scales_nonanchor)
+    #             means_nonanchor = ckbd_nonanchor(means_nonanchor)
+    #             # round and compress nonanchor
+    #             slice_nonanchor = compress_nonanchor(self.gaussian_conditional, slice_nonanchor, scales_nonanchor, means_nonanchor, symbols_list, indexes_list)
+    #             # predict residuals caused by round
+    #             lrp_nonanchor = self.lrp_nonanchor[idx](torch.cat(([hyper_means] + y_hat_slices + [slice_nonanchor + slice_anchor]), dim=1))
+    #             slice_nonanchor = slice_nonanchor + ckbd_nonanchor(lrp_nonanchor)
+    #             y_hat_slices.append(slice_nonanchor + slice_anchor)
+
+    #         else:
+    #             # Anchor
+    #             global_inter_ctx = self.global_inter_context[idx](torch.cat(y_hat_slices, dim=1))
+    #             channel_ctx = self.channel_context[idx](torch.cat(y_hat_slices, dim=1))
+    #             params_anchor = self.entropy_parameters_anchor[idx](torch.cat([global_inter_ctx, channel_ctx, hyper_params], dim=1))
+    #             scales_anchor, means_anchor = params_anchor.chunk(2, 1)
+    #             # split means and scales of anchor
+    #             scales_anchor = ckbd_anchor(scales_anchor)
+    #             means_anchor = ckbd_anchor(means_anchor)
+    #             # round and compress anchor
+    #             slice_anchor = compress_anchor(self.gaussian_conditional, slice_anchor, scales_anchor, means_anchor, symbols_list, indexes_list)
+    #             # predict residuals caused by round
+    #             lrp_anchor = self.lrp_anchor[idx](torch.cat(([hyper_means] + y_hat_slices + [slice_anchor]), dim=1))
+    #             slice_anchor = slice_anchor + ckbd_anchor(lrp_anchor)
+    #             # Non-anchor
+    #             global_intra_ctx = self.global_intra_context[idx](y_hat_slices[-1], slice_anchor)
+    #             # local_ctx: [B,2 * C, H, W]
+    #             local_ctx = self.local_context[idx](slice_anchor)
+    #             params_nonanchor = self.entropy_parameters_nonanchor[idx](torch.cat([local_ctx, global_intra_ctx, global_inter_ctx, channel_ctx, hyper_params], dim=1))
+    #             scales_nonanchor, means_nonanchor = params_nonanchor.chunk(2, 1)
+    #             # split means and scales of nonanchor
+    #             scales_nonanchor = ckbd_nonanchor(scales_nonanchor)
+    #             means_nonanchor = ckbd_nonanchor(means_nonanchor)
+    #             # round and compress nonanchor
+    #             slice_nonanchor = compress_nonanchor(self.gaussian_conditional, slice_nonanchor, scales_nonanchor, means_nonanchor, symbols_list, indexes_list)
+    #             # predict residuals caused by round
+    #             lrp_nonanchor = self.lrp_nonanchor[idx](torch.cat(([hyper_means] + y_hat_slices + [slice_nonanchor + slice_anchor]), dim=1))
+    #             slice_nonanchor = slice_nonanchor + ckbd_nonanchor(lrp_nonanchor)
+    #             y_hat_slices.append(slice_nonanchor + slice_anchor)
+
+    #     encoder.encode_with_indexes(symbols_list, indexes_list, cdf, cdf_lengths, offsets)
+    #     y_string = encoder.flush()
+    #     y_strings.append(y_string)
+    #     torch.cuda.synchronize()
+    #     end_time = time.time()
+
+    #     cost_time = end_time - start_time
+    #     return {
+    #         "strings": [y_strings, z_strings],
+    #         "shape": z.size()[-2:],
+    #         "cost_time": cost_time
+    #     }
+
+    # def decompress(self, strings, shape):
+    #     torch.cuda.synchronize()
+    #     start_time = time.time()
+    #     y_strings = strings[0][0]
+    #     z_strings = strings[1]
+    #     z_hat = self.entropy_bottleneck.decompress(z_strings, shape)
+    #     self.update_resolutions(z_hat.size(2) * 4, z_hat.size(3) * 4)
+    #     hyper_params = self.h_s(z_hat)
+    #     hyper_scales, hyper_means = hyper_params.chunk(2, 1)
+    #     y_hat_slices = []
+
+    #     cdf = self.gaussian_conditional.quantized_cdf.tolist()
+    #     cdf_lengths = self.gaussian_conditional.cdf_length.reshape(-1).int().tolist()
+    #     offsets = self.gaussian_conditional.offset.reshape(-1).int().tolist()
+    #     decoder = RansDecoder()
+    #     decoder.set_stream(y_strings)
+
+    #     for idx in range(self.slice_num):
+    #         if idx == 0:
+    #             # Anchor
+    #             params_anchor = self.entropy_parameters_anchor[idx](hyper_params)
+    #             scales_anchor, means_anchor = params_anchor.chunk(2, 1)
+    #             # split means and scales of anchor
+    #             scales_anchor = ckbd_anchor(scales_anchor)
+    #             means_anchor = ckbd_anchor(means_anchor)
+    #             # decompress anchor
+    #             slice_anchor = decompress_anchor(self.gaussian_conditional, scales_anchor, means_anchor, decoder, cdf, cdf_lengths, offsets)
+    #             # predict residuals caused by round
+    #             lrp_anchor = self.lrp_anchor[idx](torch.cat(([hyper_means] + y_hat_slices + [slice_anchor]), dim=1))
+    #             slice_anchor = slice_anchor + ckbd_anchor(lrp_anchor)
+    #             # Non-anchor
+    #             # local_ctx: [B,2 * C, H, W]
+    #             local_ctx = self.local_context[idx](slice_anchor)
+    #             params_nonanchor = self.entropy_parameters_nonanchor[idx](torch.cat([local_ctx, hyper_params], dim=1))
+    #             scales_nonanchor, means_nonanchor = params_nonanchor.chunk(2, 1)
+    #             # split means and scales of nonanchor
+    #             scales_nonanchor = ckbd_nonanchor(scales_nonanchor)
+    #             means_nonanchor = ckbd_nonanchor(means_nonanchor)
+    #             # decompress non-anchor
+    #             slice_nonanchor = decompress_nonanchor(self.gaussian_conditional, scales_nonanchor, means_nonanchor, decoder, cdf, cdf_lengths, offsets)
+    #             # predict residuals caused by round
+    #             lrp_nonanchor = self.lrp_nonanchor[idx](torch.cat(([hyper_means] + y_hat_slices + [slice_nonanchor + slice_anchor]), dim=1))
+    #             slice_nonanchor = slice_nonanchor + ckbd_nonanchor(lrp_nonanchor)
+    #             y_hat_slices.append(slice_nonanchor + slice_anchor)
+
+    #         else:
+    #             # Anchor
+    #             global_inter_ctx = self.global_inter_context[idx](torch.cat(y_hat_slices, dim=1))
+    #             channel_ctx = self.channel_context[idx](torch.cat(y_hat_slices, dim=1))
+    #             params_anchor = self.entropy_parameters_anchor[idx](torch.cat([global_inter_ctx, channel_ctx, hyper_params], dim=1))
+    #             scales_anchor, means_anchor = params_anchor.chunk(2, 1)
+    #             # split means and scales of anchor
+    #             scales_anchor = ckbd_anchor(scales_anchor)
+    #             means_anchor = ckbd_anchor(means_anchor)
+    #             # decompress anchor
+    #             slice_anchor = decompress_anchor(self.gaussian_conditional, scales_anchor, means_anchor, decoder, cdf, cdf_lengths, offsets)
+    #             # predict residuals caused by round
+    #             lrp_anchor = self.lrp_anchor[idx](torch.cat(([hyper_means] + y_hat_slices + [slice_anchor]), dim=1))
+    #             slice_anchor = slice_anchor + ckbd_anchor(lrp_anchor)
+    #             # Non-anchor
+    #             # Non-anchor
+    #             global_intra_ctx = self.global_intra_context[idx](y_hat_slices[-1], slice_anchor)
+    #             # local_ctx: [B,2 * C, H, W]
+    #             local_ctx = self.local_context[idx](slice_anchor)
+    #             params_nonanchor = self.entropy_parameters_nonanchor[idx](torch.cat([local_ctx, global_intra_ctx, global_inter_ctx, channel_ctx, hyper_params], dim=1))
+    #             scales_nonanchor, means_nonanchor = params_nonanchor.chunk(2, 1)
+    #             # split means and scales of nonanchor
+    #             scales_nonanchor = ckbd_nonanchor(scales_nonanchor)
+    #             means_nonanchor = ckbd_nonanchor(means_nonanchor)
+    #             # decompress non-anchor
+    #             slice_nonanchor = decompress_nonanchor(self.gaussian_conditional, scales_nonanchor, means_nonanchor, decoder, cdf, cdf_lengths, offsets)
+    #             # predict residuals caused by round
+    #             lrp_nonanchor = self.lrp_nonanchor[idx](torch.cat(([hyper_means] + y_hat_slices + [slice_nonanchor + slice_anchor]), dim=1))
+    #             slice_nonanchor = slice_nonanchor + ckbd_nonanchor(lrp_nonanchor)
+    #             y_hat_slices.append(slice_nonanchor + slice_anchor)
+
+    #     y_hat = torch.cat(y_hat_slices, dim=1)
+    #     x_hat = self.g_s(y_hat)
+    #     torch.cuda.synchronize()
+    #     end_time = time.time()
+
+    #     cost_time = end_time - start_time
+
+    #     return {
+    #         "x_hat": x_hat,
+    #         "cost_time": cost_time
+    #     }
+    
+    def decompress(self, strings, shape, stage=2, s=1, inputscale=0):
         torch.cuda.synchronize()
         start_time = time.time()
+
+        if inputscale != 0:
+            scale = inputscale
+        else:
+            assert s in range(
+                0, self.levels
+            ), f"s should in range(0, {self.levels}), but get s:{s}"
+            scale = torch.abs(self.Gain[s])
+
+        rescale = torch.tensor(1.0) / scale
+
         y_strings = strings[0][0]
         z_strings = strings[1]
         z_hat = self.entropy_bottleneck.decompress(z_strings, shape)
@@ -638,63 +909,123 @@ class MLICPlusPlus(CompressionModel):
         decoder.set_stream(y_strings)
 
         for idx in range(self.slice_num):
-            if idx == 0:
-                # Anchor
-                params_anchor = self.entropy_parameters_anchor[idx](hyper_params)
-                scales_anchor, means_anchor = params_anchor.chunk(2, 1)
-                # split means and scales of anchor
-                scales_anchor = ckbd_anchor(scales_anchor)
-                means_anchor = ckbd_anchor(means_anchor)
-                # decompress anchor
-                slice_anchor = decompress_anchor(self.gaussian_conditional, scales_anchor, means_anchor, decoder, cdf, cdf_lengths, offsets)
-                # predict residuals caused by round
-                lrp_anchor = self.lrp_anchor[idx](torch.cat(([hyper_means] + y_hat_slices + [slice_anchor]), dim=1))
-                slice_anchor = slice_anchor + ckbd_anchor(lrp_anchor)
-                # Non-anchor
-                # local_ctx: [B,2 * C, H, W]
-                local_ctx = self.local_context[idx](slice_anchor)
-                params_nonanchor = self.entropy_parameters_nonanchor[idx](torch.cat([local_ctx, hyper_params], dim=1))
-                scales_nonanchor, means_nonanchor = params_nonanchor.chunk(2, 1)
-                # split means and scales of nonanchor
-                scales_nonanchor = ckbd_nonanchor(scales_nonanchor)
-                means_nonanchor = ckbd_nonanchor(means_nonanchor)
-                # decompress non-anchor
-                slice_nonanchor = decompress_nonanchor(self.gaussian_conditional, scales_nonanchor, means_nonanchor, decoder, cdf, cdf_lengths, offsets)
-                # predict residuals caused by round
-                lrp_nonanchor = self.lrp_nonanchor[idx](torch.cat(([hyper_means] + y_hat_slices + [slice_nonanchor + slice_anchor]), dim=1))
-                slice_nonanchor = slice_nonanchor + ckbd_nonanchor(lrp_nonanchor)
-                y_hat_slices.append(slice_nonanchor + slice_anchor)
 
-            else:
-                # Anchor
-                global_inter_ctx = self.global_inter_context[idx](torch.cat(y_hat_slices, dim=1))
-                channel_ctx = self.channel_context[idx](torch.cat(y_hat_slices, dim=1))
-                params_anchor = self.entropy_parameters_anchor[idx](torch.cat([global_inter_ctx, channel_ctx, hyper_params], dim=1))
-                scales_anchor, means_anchor = params_anchor.chunk(2, 1)
-                # split means and scales of anchor
-                scales_anchor = ckbd_anchor(scales_anchor)
-                means_anchor = ckbd_anchor(means_anchor)
-                # decompress anchor
-                slice_anchor = decompress_anchor(self.gaussian_conditional, scales_anchor, means_anchor, decoder, cdf, cdf_lengths, offsets)
-                # predict residuals caused by round
-                lrp_anchor = self.lrp_anchor[idx](torch.cat(([hyper_means] + y_hat_slices + [slice_anchor]), dim=1))
-                slice_anchor = slice_anchor + ckbd_anchor(lrp_anchor)
-                # Non-anchor
-                # Non-anchor
-                global_intra_ctx = self.global_intra_context[idx](y_hat_slices[-1], slice_anchor)
-                # local_ctx: [B,2 * C, H, W]
-                local_ctx = self.local_context[idx](slice_anchor)
-                params_nonanchor = self.entropy_parameters_nonanchor[idx](torch.cat([local_ctx, global_intra_ctx, global_inter_ctx, channel_ctx, hyper_params], dim=1))
-                scales_nonanchor, means_nonanchor = params_nonanchor.chunk(2, 1)
-                # split means and scales of nonanchor
-                scales_nonanchor = ckbd_nonanchor(scales_nonanchor)
-                means_nonanchor = ckbd_nonanchor(means_nonanchor)
-                # decompress non-anchor
-                slice_nonanchor = decompress_nonanchor(self.gaussian_conditional, scales_nonanchor, means_nonanchor, decoder, cdf, cdf_lengths, offsets)
-                # predict residuals caused by round
-                lrp_nonanchor = self.lrp_nonanchor[idx](torch.cat(([hyper_means] + y_hat_slices + [slice_nonanchor + slice_anchor]), dim=1))
-                slice_nonanchor = slice_nonanchor + ckbd_nonanchor(lrp_nonanchor)
-                y_hat_slices.append(slice_nonanchor + slice_anchor)
+            if stage == 1:
+                if idx == 0:
+                    # Anchor
+                    params_anchor = self.entropy_parameters_anchor[idx](hyper_params)
+                    scales_anchor, means_anchor = params_anchor.chunk(2, 1)
+                    # split means and scales of anchor
+                    scales_anchor = ckbd_anchor(scales_anchor)
+                    means_anchor = ckbd_anchor(means_anchor)
+                    # decompress anchor
+                    slice_anchor = decompress_anchor(self.gaussian_conditional, scales_anchor, means_anchor, decoder, cdf, cdf_lengths, offsets)
+                    # predict residuals caused by round
+                    lrp_anchor = self.lrp_anchor[idx](torch.cat(([hyper_means] + y_hat_slices + [slice_anchor]), dim=1))
+                    slice_anchor = slice_anchor + ckbd_anchor(lrp_anchor)
+                    # Non-anchor
+                    # local_ctx: [B,2 * C, H, W]
+                    local_ctx = self.local_context[idx](slice_anchor)
+                    params_nonanchor = self.entropy_parameters_nonanchor[idx](torch.cat([local_ctx, hyper_params], dim=1))
+                    scales_nonanchor, means_nonanchor = params_nonanchor.chunk(2, 1)
+                    # split means and scales of nonanchor
+                    scales_nonanchor = ckbd_nonanchor(scales_nonanchor)
+                    means_nonanchor = ckbd_nonanchor(means_nonanchor)
+                    # decompress non-anchor
+                    slice_nonanchor = decompress_nonanchor(self.gaussian_conditional, scales_nonanchor, means_nonanchor, decoder, cdf, cdf_lengths, offsets)
+                    # predict residuals caused by round
+                    lrp_nonanchor = self.lrp_nonanchor[idx](torch.cat(([hyper_means] + y_hat_slices + [slice_nonanchor + slice_anchor]), dim=1))
+                    slice_nonanchor = slice_nonanchor + ckbd_nonanchor(lrp_nonanchor)
+                    y_hat_slices.append(slice_nonanchor + slice_anchor)
+
+                else:
+                    # Anchor
+                    global_inter_ctx = self.global_inter_context[idx](torch.cat(y_hat_slices, dim=1))
+                    channel_ctx = self.channel_context[idx](torch.cat(y_hat_slices, dim=1))
+                    params_anchor = self.entropy_parameters_anchor[idx](torch.cat([global_inter_ctx, channel_ctx, hyper_params], dim=1))
+                    scales_anchor, means_anchor = params_anchor.chunk(2, 1)
+                    # split means and scales of anchor
+                    scales_anchor = ckbd_anchor(scales_anchor)
+                    means_anchor = ckbd_anchor(means_anchor)
+                    # decompress anchor
+                    slice_anchor = decompress_anchor(self.gaussian_conditional, scales_anchor, means_anchor, decoder, cdf, cdf_lengths, offsets)
+                    # predict residuals caused by round
+                    lrp_anchor = self.lrp_anchor[idx](torch.cat(([hyper_means] + y_hat_slices + [slice_anchor]), dim=1))
+                    slice_anchor = slice_anchor + ckbd_anchor(lrp_anchor)
+                    # Non-anchor
+                    # Non-anchor
+                    global_intra_ctx = self.global_intra_context[idx](y_hat_slices[-1], slice_anchor)
+                    # local_ctx: [B,2 * C, H, W]
+                    local_ctx = self.local_context[idx](slice_anchor)
+                    params_nonanchor = self.entropy_parameters_nonanchor[idx](torch.cat([local_ctx, global_intra_ctx, global_inter_ctx, channel_ctx, hyper_params], dim=1))
+                    scales_nonanchor, means_nonanchor = params_nonanchor.chunk(2, 1)
+                    # split means and scales of nonanchor
+                    scales_nonanchor = ckbd_nonanchor(scales_nonanchor)
+                    means_nonanchor = ckbd_nonanchor(means_nonanchor)
+                    # decompress non-anchor
+                    slice_nonanchor = decompress_nonanchor(self.gaussian_conditional, scales_nonanchor, means_nonanchor, decoder, cdf, cdf_lengths, offsets)
+                    # predict residuals caused by round
+                    lrp_nonanchor = self.lrp_nonanchor[idx](torch.cat(([hyper_means] + y_hat_slices + [slice_nonanchor + slice_anchor]), dim=1))
+                    slice_nonanchor = slice_nonanchor + ckbd_nonanchor(lrp_nonanchor)
+                    y_hat_slices.append(slice_nonanchor + slice_anchor)
+            elif stage == 2:
+                if idx == 0:
+                    # Anchor
+                    params_anchor = self.entropy_parameters_anchor[idx](hyper_params)
+                    scales_anchor, means_anchor = params_anchor.chunk(2, 1)
+                    # split means and scales of anchor
+                    scales_anchor = ckbd_anchor(scales_anchor)
+                    means_anchor = ckbd_anchor(means_anchor)
+                    # decompress anchor
+                    slice_anchor = decompress_anchor_vbr(self.gaussian_conditional, scales_anchor, means_anchor, decoder, cdf, cdf_lengths, offsets)
+                    # predict residuals caused by round
+                    lrp_anchor = self.lrp_anchor[idx](torch.cat(([hyper_means] + y_hat_slices + [slice_anchor]), dim=1))
+                    slice_anchor = slice_anchor + ckbd_anchor(lrp_anchor)
+                    # Non-anchor
+                    # local_ctx: [B,2 * C, H, W]
+                    local_ctx = self.local_context[idx](slice_anchor)
+                    params_nonanchor = self.entropy_parameters_nonanchor[idx](torch.cat([local_ctx, hyper_params], dim=1))
+                    scales_nonanchor, means_nonanchor = params_nonanchor.chunk(2, 1)
+                    # split means and scales of nonanchor
+                    scales_nonanchor = ckbd_nonanchor(scales_nonanchor)
+                    means_nonanchor = ckbd_nonanchor(means_nonanchor)
+                    # decompress non-anchor
+                    slice_nonanchor = decompress_nonanchor_vbr(self.gaussian_conditional, scales_nonanchor, means_nonanchor, decoder, cdf, cdf_lengths, offsets)
+                    # predict residuals caused by round
+                    lrp_nonanchor = self.lrp_nonanchor[idx](torch.cat(([hyper_means] + y_hat_slices + [slice_nonanchor + slice_anchor]), dim=1))
+                    slice_nonanchor = slice_nonanchor + ckbd_nonanchor(lrp_nonanchor)
+                    y_hat_slices.append(slice_nonanchor + slice_anchor)
+
+                else:
+                    # Anchor
+                    global_inter_ctx = self.global_inter_context[idx](torch.cat(y_hat_slices, dim=1))
+                    channel_ctx = self.channel_context[idx](torch.cat(y_hat_slices, dim=1))
+                    params_anchor = self.entropy_parameters_anchor[idx](torch.cat([global_inter_ctx, channel_ctx, hyper_params], dim=1))
+                    scales_anchor, means_anchor = params_anchor.chunk(2, 1)
+                    # split means and scales of anchor
+                    scales_anchor = ckbd_anchor(scales_anchor)
+                    means_anchor = ckbd_anchor(means_anchor)
+                    # decompress anchor
+                    slice_anchor = decompress_anchor_vbr(self.gaussian_conditional, scales_anchor, means_anchor, decoder, cdf, cdf_lengths, offsets)
+                    # predict residuals caused by round
+                    lrp_anchor = self.lrp_anchor[idx](torch.cat(([hyper_means] + y_hat_slices + [slice_anchor]), dim=1))
+                    slice_anchor = slice_anchor + ckbd_anchor(lrp_anchor)
+                    # Non-anchor
+                    # Non-anchor
+                    global_intra_ctx = self.global_intra_context[idx](y_hat_slices[-1], slice_anchor)
+                    # local_ctx: [B,2 * C, H, W]
+                    local_ctx = self.local_context[idx](slice_anchor)
+                    params_nonanchor = self.entropy_parameters_nonanchor[idx](torch.cat([local_ctx, global_intra_ctx, global_inter_ctx, channel_ctx, hyper_params], dim=1))
+                    scales_nonanchor, means_nonanchor = params_nonanchor.chunk(2, 1)
+                    # split means and scales of nonanchor
+                    scales_nonanchor = ckbd_nonanchor(scales_nonanchor)
+                    means_nonanchor = ckbd_nonanchor(means_nonanchor)
+                    # decompress non-anchor
+                    slice_nonanchor = decompress_nonanchor_vbr(self.gaussian_conditional, scales_nonanchor, means_nonanchor, decoder, cdf, cdf_lengths, offsets, scale, rescale)
+                    # predict residuals caused by round
+                    lrp_nonanchor = self.lrp_nonanchor[idx](torch.cat(([hyper_means] + y_hat_slices + [slice_nonanchor + slice_anchor]), dim=1))
+                    slice_nonanchor = slice_nonanchor + ckbd_nonanchor(lrp_nonanchor)
+                    y_hat_slices.append(slice_nonanchor + slice_anchor)
 
         y_hat = torch.cat(y_hat_slices, dim=1)
         x_hat = self.g_s(y_hat)
@@ -805,6 +1136,17 @@ class MLICPlusPlus(CompressionModel):
     #     updated |= super().update(force=force)
     #     return updated
     
+    @classmethod
+    def from_state_dict(cls, state_dict, vr_entbttlnck=False):
+        """Return a new model instance from `state_dict`."""
+        N = state_dict["g_a.0.weight"].size(0)
+        M = state_dict["g_a.6.weight"].size(0)
+        net = cls(N, M, vr_entbttlnck)
+        if "QuantOffset" in state_dict.keys():
+            del state_dict["QuantOffset"]
+        net.load_state_dict(state_dict)
+        return net
+
     def update(self, scale_table=None, force=False, scale=None):
         if scale_table is None:
             scale_table = get_scale_table()
