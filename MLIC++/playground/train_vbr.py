@@ -14,8 +14,8 @@ from compressai.datasets import ImageFolder
 from utils.logger import setup_logger
 from utils.utils import CustomDataParallel, save_checkpoint
 from utils.optimizers import configure_optimizers
-from utils.training import train_one_epoch
-from utils.testing import test_one_epoch
+from utils.training import train_one_epoch, train_one_epoch_mmo
+from utils.testing import test_one_epoch, test_one_epoch_vbr
 from loss.rd_loss import RateDistortionLoss
 from config.args import train_options
 from config.config import model_config
@@ -130,7 +130,7 @@ def main():
     for epoch in range(start_epoch, args.epochs):
         logger_train.info(f"Learning rate: {optimizer.param_groups[0]['lr']}")
         
-        current_step = train_one_epoch(
+        current_step = train_one_epoch_mmo(
             net,
             criterion,
             train_dataloader,
@@ -144,7 +144,7 @@ def main():
         )
 
         save_dir = os.path.join('./experiments', args.experiment, 'val_images', '%03d' % (epoch + 1))
-        loss = test_one_epoch(epoch, test_dataloader, net, criterion, save_dir, logger_val, tb_logger)
+        loss = test_one_epoch_vbr(epoch, test_dataloader, net, criterion, save_dir, logger_val, tb_logger)
 
         lr_scheduler.step()
         is_best = loss < best_loss

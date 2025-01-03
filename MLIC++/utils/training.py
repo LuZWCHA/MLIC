@@ -154,7 +154,7 @@ class MinNormSolver:
         
         return alpha
 
-from models.mlicpp_vqr import MLICPlusPlusVbr
+from models.mlicpp_vbr import MLICPlusPlusVbr
 def train_one_epoch_mmo(
     model: MLICPlusPlusVbr, criterion, train_dataloader, optimizer, aux_optimizer, epoch, clip_max_norm, logger_train, tb_logger, current_step
 ):
@@ -178,6 +178,7 @@ def train_one_epoch_mmo(
         # with autocast(enabled=amp):
         for s, lmbda in enumerate(model.lmbda):
             out_net = model.forward(d, stage=2, s=s)
+            criterion.set_lmbda(lmbda)
             out_criterion = criterion(out_net, d)
             loss = out_criterion["loss"]
             losses.append(loss)
