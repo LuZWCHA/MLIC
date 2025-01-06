@@ -4,6 +4,7 @@ from models import *
 def get_model(model_name):
     model_config_ = cf.model_config(model_name)
     model_cls = MLICPlusPlus
+    print(model_name)
 
     if model_name in ["MLICPP_L", "MLICPP_M", "MLICPP_S", "MLICPP_S2"]:
         model_cls = MLICPlusPlus

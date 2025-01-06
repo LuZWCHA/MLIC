@@ -101,8 +101,8 @@ def main():
             new_sd[k] = v
         net.load_state_dict(new_sd)
         # net.load_state_dict(checkpoint['state_dict'])
-        optimizer.load_state_dict(checkpoint['optimizer'])
-        aux_optimizer.load_state_dict(checkpoint['aux_optimizer'])
+        # optimizer.load_state_dict(checkpoint['optimizer'])
+        # aux_optimizer.load_state_dict(checkpoint['aux_optimizer'])
         # lr_scheduler.load_state_dict(checkpoint['lr_scheduler'])
         lr_scheduler = optim.lr_scheduler.MultiStepLR(optimizer, milestones=[450,550], gamma=0.1)
         # lr_scheduler._step_count = checkpoint['lr_scheduler']['_step_count']

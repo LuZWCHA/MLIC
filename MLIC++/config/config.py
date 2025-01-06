@@ -25,7 +25,7 @@ def model_config(model_name="MLICPP_S"):
             "context_window": 5,
             "act": nn.GELU,
         }) # 1620 GMacs normal conv2d
-    elif model_name == "MLICPP_S":
+    elif model_name in ["MLICPP_S", "MLICPP_S_VBR"]:
         config = Config({
             "N": 16 * 6,
             "M": 32 * 5,

@@ -28,7 +28,7 @@ class MLICPlusPlus(CompressionModel):
 
         self.g_a = AnalysisTransform(N=N, M=M)
         self.h_a = HyperAnalysis(M=M, N=N)
-        
+
         self.g_s = SynthesisTransform(N=N, M=M)
         self.h_s = HyperSynthesis(M=M, N=N)
 
@@ -189,7 +189,6 @@ class MLICPlusPlus(CompressionModel):
             for param in self.g_a.parameters():
                 if param.device is not None:
                     device = param.device
-                print(device)
                 break
         for i in range(len(self.global_intra_context)):
             if i == 0:

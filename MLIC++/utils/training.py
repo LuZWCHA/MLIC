@@ -116,43 +116,27 @@ import torch.optim as optim
 from torch.autograd import grad
 
 class MinNormSolver:
-    """
-    求解最小范数问题的工具类。
-    """
     @staticmethod
-    def find_min_norm_element(grads, max_iter=20, tol=1e-4):
-        """
-        找到最小范数解。
-        :param grads: 梯度列表，每个元素是一个 torch.Tensor。
-        :param max_iter: 最大迭代次数。
-        :param tol: 收敛容忍度。
-        :return: 权重 alpha。
-        """
+    def find_min_norm_element(grads, max_iter=100, tol=1e-5):
         num_tasks = len(grads)
-        alpha = torch.ones(num_tasks) / num_tasks  # 初始化为均匀权重
-        grads_tensor = torch.stack(grads)  # 将梯度列表堆叠为一个张量以便向量化操作
-        
+        device = grads[0].device
+        alpha = torch.ones(num_tasks, device=device) / num_tasks
+        grads_tensor = torch.stack(grads)
+        norms_sq_gi = torch.sum(grads_tensor ** 2, dim=1)
+
         for iteration in range(max_iter):
-            # 计算当前梯度（向量化操作）
             grad = torch.matmul(alpha, grads_tensor)
-            
-            # 找到最速下降方向（向量化操作）
-            norms = torch.norm(grads_tensor - grad, dim=1)
-            min_norm_dir = torch.argmin(norms)
-            
-            # 计算步长
-            step_size = 2.0 / (iteration + 2.0)  # 步长逐渐减小
-            
-            # 更新权重
-            new_alpha = torch.zeros(num_tasks)
+            # norms = torch.norm(grads_tensor - grad, dim=1)
+            norms_sq = norms_sq_gi - 2 * (grads_tensor @ grad) + torch.sum(grad ** 2)
+            min_norm_dir = torch.argmin(norms_sq)
+            step_size = 2.0 / (iteration + 2.0)
+            new_alpha = torch.zeros(num_tasks, device=device)
             new_alpha[min_norm_dir] = 1.0
             alpha = (1 - step_size) * alpha + step_size * new_alpha
-            
-            # 检查收敛
             if torch.norm(new_alpha - alpha) < tol:
                 break
-        
         return alpha
+
 
 from models.mlicpp_vbr import MLICPlusPlusVbr
 def train_one_epoch_mmo(
@@ -168,7 +152,7 @@ def train_one_epoch_mmo(
         # SR
         # blur_d = gauss_k(d)
 
-        optimizer.zero_grad()
+        # optimizer.zero_grad()
         aux_optimizer.zero_grad()
 
         # 计算每个任务的损失和梯度
@@ -182,25 +166,37 @@ def train_one_epoch_mmo(
             out_criterion = criterion(out_net, d)
             loss = out_criterion["loss"]
             losses.append(loss)
-            grad_theta = grad(loss, model.parameters(), retain_graph=True)
-            grads_theta.append(grad_theta)
 
-            # model.Gain grad is always zero
-            # grad_gain = grad(loss, [model.Gain[i]], retain_graph=True)
-            # grads_gain.append(grad_gain)
-
-        # 计算权重 alpha
-        alpha = MinNormSolver.find_min_norm_element(grads_theta)
-
+        # 计算每个任务的梯度
+        grads_theta = []
+        for i in range(len(losses)):
+            loss = losses[i]
+            grad_theta_i = torch.autograd.grad(loss, model.parameters(), retain_graph=True, allow_unused=True)
+            grads_theta.append(torch.cat([g.view(-1) for g in grad_theta_i]))
+        
+        # 求解最小范数权重
+        alpha = MinNormSolver.find_min_norm_element(grads_theta, max_iter=5, tol=5e-4)
+        
+        # 计算加权梯度
+        weighted_grad = torch.zeros_like(grads_theta[0])
+        for i in range(len(losses)):
+            weighted_grad += alpha[i] * grads_theta[i]
+        
         # 更新共享参数 theta
-        for param, grad_theta in zip(model.parameters(), zip(*grads_theta)):
-            param.grad = sum(a * g for a, g in zip(alpha, grad_theta))
+        idx = 0
+        with torch.no_grad():
+            for param in model.parameters():
+                param_size = param.numel()
+                grad_slice = weighted_grad[idx:idx+param_size]
+                grad_slice = grad_slice.view(param.shape)
+                param.data -= optimizer.param_groups[0]['lr'] * grad_slice
+                idx += param_size
 
         # scaler.scale(out_criterion["loss"]).backward()
 
         if clip_max_norm > 0:
             torch.nn.utils.clip_grad_norm_(model.parameters(), clip_max_norm)
-        optimizer.step()
+        # optimizer.step()
         # scaler.step(optimizer)
 
         aux_loss = model.aux_loss()

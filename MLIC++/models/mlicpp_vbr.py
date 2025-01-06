@@ -80,12 +80,12 @@ class MLICPlusPlusVbr(CompressionModel):
         ###################################################### VBR modules ####################################################
 
         # lambdas to use during training
-        self.lmbda = [0.0005, 0.001, 0.0018, 0.0035, 0.0067, 0.0130, 0.025, 0.0483, 0.0932, 0.18]
+        self.lmbda = [0.0005, 0.0035, 0.0067, 0.025, 0.0483, 0.18]
         self.levels = len(self.lmbda)
         # gain: inverse of quantization step size
         self.Gain = torch.nn.Parameter(
             torch.tensor(
-                [0.06556, 0.08333, 0.10000, 0.13944, 0.19293, 0.26874, 0.37268, 0.51801, 0.71957, 1.00000]
+                [0.06556, 0.13944, 0.19293, 0.37268, 0.51801, 1.00000]
             ),
             requires_grad=True,
         )
@@ -151,7 +151,7 @@ class MLICPlusPlusVbr(CompressionModel):
 
         scale = self._get_scale(stage, s, inputscale)
         rescale = 1.0 / scale.clone().detach()
-        self.update_resolutions(x.size(2) // 16, x.size(3) // 16)
+        self.update_resolutions(x.size(2) // 16, x.size(3) // 16, device=x.device)
     
         if stage == 1:
             y = self.g_a(x)
@@ -518,12 +518,18 @@ class MLICPlusPlusVbr(CompressionModel):
             "likelihoods": {"y_likelihoods": y_likelihoods, "z_likelihoods": z_likelihoods}
         }
 
-    def update_resolutions(self, H, W):
+    def update_resolutions(self, H, W, device=None):
+        if device is None:
+            for param in self.g_a.parameters():
+                if param.device is not None:
+                    device = param.device
+                # print(device)
+                break
         for i in range(len(self.global_intra_context)):
             if i == 0:
-                self.local_context[i].update_resolution(H, W, next(self.parameters()).device, mask=None)
+                self.local_context[i].update_resolution(H, W, device, mask=None)
             else:
-                self.local_context[i].update_resolution(H, W, next(self.parameters()).device, mask=self.local_context[0].attn_mask)
+                self.local_context[i].update_resolution(H, W, device, mask=self.local_context[0].attn_mask)
 
 
     def compress(self, x, stage: int = 2, s: int = 1, inputscale=0):
@@ -1127,7 +1133,7 @@ class MLICPlusPlusVbr(CompressionModel):
             ["_quantized_cdf", "_offset", "_cdf_length", "scale_table"],
             state_dict,
         )
-        super().load_state_dict(state_dict)
+        super().load_state_dict(state_dict, strict=False)
 
     # def update(self, scale_table=None, force=False):
     #     if scale_table is None:
