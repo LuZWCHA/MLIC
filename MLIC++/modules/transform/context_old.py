@@ -117,13 +117,13 @@ class ChannelContext(nn.Module):
         super().__init__()
         self.fushion = nn.Sequential(
             # nn.Conv2d(in_dim, 192, kernel_size=3, stride=1, padding=1),
-            conv3x3(in_dim, hidden[0]),
+            conv3x3(in_dim, hidden[0], use_deep_wise_conv=False),
             nn.GELU(),
             # nn.Conv2d(192, 128, kernel_size=3, stride=1, padding=1),
-            conv3x3(hidden[0], hidden[1]),
+            conv3x3(hidden[0], hidden[1], use_deep_wise_conv=False),
             nn.GELU(),
             # nn.Conv2d(128, out_dim * 4, kernel_size=3, stride=1, padding=1),
-            conv3x3(hidden[1], out_dim * 4)
+            conv3x3(hidden[1], out_dim * 4, use_deep_wise_conv=False)
         )
 
     def forward(self, channel_params):

@@ -402,7 +402,7 @@ def test_model(test_dataloader, net, logger_test, save_dir, epoch):
         f"Avg DISTS: {avg_dists.avg:.4f} | "
         f"Avg MS-SSIM: {avg_ms_ssim.avg:.4f} | "
         f"Avg Encoding Latency:: {avg_enc_time.avg:.4f} | "
-        f"Avg decoding Latency:: {avg_dec_time.avg:.4f}"
+        f"Avg Decoding Latency:: {avg_dec_time.avg:.4f}"
     )
 
 
@@ -543,5 +543,5 @@ def test_model_vbr(test_dataloader, net, logger_test, save_dir, epoch, custom_sc
             f"Avg DISTS: {avg_dists.avg:.4f} | "
             f"Avg MS-SSIM: {avg_ms_ssim.avg:.4f} | "
             f"Avg Encoding Latency:: {avg_enc_time.avg:.4f} | "
-            f"Avg decoding Latency:: {avg_dec_time.avg:.4f}"
+            f"Avg Decoding Latency:: {avg_dec_time.avg:.4f}"
         )

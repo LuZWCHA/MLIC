@@ -9,8 +9,11 @@ from utils.func import update_registered_buffers, get_scale_table
 from utils.ckbd import *
 from modules.transform import *
 
+from modules.transform.analysis_old import AnalysisTransform, HyperAnalysis
+from modules.transform.context_old import ChannelContext, LinearGlobalInterContext, LinearGlobalIntraContext
 
-class MLICPlusPlus(CompressionModel):
+
+class MLICPlusPlusSD(CompressionModel):
     def __init__(self, config, **kwargs):
         super().__init__(config.N, **kwargs)
         N = config.N
@@ -28,10 +31,13 @@ class MLICPlusPlus(CompressionModel):
 
         self.g_a = AnalysisTransform(N=N, M=M)
         self.h_a = HyperAnalysis(M=M, N=N)
-        
-        self.g_s = SynthesisTransform(N=N, M=M)
-        self.h_s = HyperSynthesis(M=M, N=N)
 
+        # reload
+        self.g_s = SynthesisTransform(N=N // 4, M=M)
+        self.h_s = HyperSynthesis(M=M // 4, N=N)
+
+        M = M // 4
+        N = N // 4
         # Gussian Conditional
         self.gaussian_conditional = GaussianConditional(None)
 
@@ -41,7 +47,7 @@ class MLICPlusPlus(CompressionModel):
         )
 
         self.channel_context = nn.ModuleList(
-            ChannelContext(in_dim=slice_ch * i, out_dim=slice_ch) if i else None
+            ChannelContext(in_dim=slice_ch * i, out_dim=slice_ch, hidden=[96, 96]) if i else None
             for i in range(slice_num)
         )
 
@@ -67,11 +73,11 @@ class MLICPlusPlus(CompressionModel):
 
         # Latent Residual Prediction
         self.lrp_anchor = nn.ModuleList(
-            LatentResidualPrediction(in_dim=M + (i + 1) * slice_ch, out_dim=slice_ch)
+            LatentResidualPredictionOld(in_dim=M + (i + 1) * slice_ch, out_dim=slice_ch)
             for i in range(slice_num)
         )
         self.lrp_nonanchor = nn.ModuleList(
-            LatentResidualPrediction(in_dim=M + (i + 1) * slice_ch, out_dim=slice_ch)
+            LatentResidualPredictionOld(in_dim=M + (i + 1) * slice_ch, out_dim=slice_ch)
             for i in range(slice_num)
         )
 
@@ -459,14 +465,14 @@ class MLICPlusPlus(CompressionModel):
 
         return x_hat
 
-    def load_state_dict(self, state_dict):
+    def load_state_dict(self, state_dict, strict=False):
         update_registered_buffers(
             self.gaussian_conditional,
             "gaussian_conditional",
             ["_quantized_cdf", "_offset", "_cdf_length", "scale_table"],
             state_dict,
         )
-        super().load_state_dict(state_dict)
+        super().load_state_dict(state_dict, strict)
 
     def update(self, scale_table=None, force=False):
         if scale_table is None:
@@ -474,3 +480,22 @@ class MLICPlusPlus(CompressionModel):
         updated = self.gaussian_conditional.update_scale_table(scale_table, force=force)
         updated |= super().update(force=force)
         return updated
+
+    def load_pretrained(self, state_dict):
+        remove_keys = []
+        for (k1, v1), (k2, v2) in zip(self.state_dict().items(), state_dict.items()):
+            if (v1.shape != v2.shape or k1 != k2) and "gaussian_conditional" not in k2 and "entropy_bottleneck" not in k2:
+                remove_keys.append(k2)
+            else:
+                print(f"Keep {k2}")
+        for i in remove_keys:
+            del state_dict[i]
+        self.load_state_dict(state_dict, strict=False)
+
+    def frezze_some_layers(self):
+        frezze_layers = [self.g_a, self.h_a, self.local_context, self.global_inter_context, self.global_intra_context]
+
+        for layer in frezze_layers:
+            for i in layer.parameters():
+                i.requires_grad = False
+

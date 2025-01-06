@@ -46,7 +46,9 @@ def main():
 
     device = "cuda" if args.cuda and torch.cuda.is_available() else "cpu"
     
-    net = MLICPlusPlus(config=config)
+    from models.model_loader import get_model
+    net = get_model(args.model_name)
+
     net = net.to(device)
     if os.path.exists(args.checkpoint):
         checkpoint = torch.load(args.checkpoint)
@@ -57,7 +59,7 @@ def main():
                 k = k[7:]
             new_sd[k] = v
         net.load_state_dict(new_sd)
-        epoch = checkpoint["epoch"]
+        epoch = checkpoint["epoch"] if "epoch" in checkpoint else 0
     else:
         epoch = 0
         print("Checkpoint not found.")

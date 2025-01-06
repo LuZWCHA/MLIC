@@ -82,7 +82,8 @@ def main():
         pin_memory=(device == "cuda"),
     )
 
-    net = MLICPlusPlus(config=config)
+    from models.model_loader import get_model
+    net = get_model(args.model_name)
     
     net = net.to(device)
     optimizer, aux_optimizer = configure_optimizers(net, args)

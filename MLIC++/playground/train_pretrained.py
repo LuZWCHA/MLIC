@@ -90,6 +90,18 @@ def main():
     lr_scheduler = optim.lr_scheduler.MultiStepLR(optimizer, milestones=[80, 100], gamma=0.1)
     criterion = RateDistortionLoss(lmbda=args.lmbda, metrics=args.metrics)
 
+    if args.pretrained != None:
+        checkpoint = torch.load(args.pretrained)
+        # new_ckpt = modify_checkpoint(checkpoint['state_dict'])
+        new_sd = dict()
+        for k, v in checkpoint['state_dict'].items():
+            k: str
+            while k.startswith("module."):
+                k = k[7:]
+            new_sd[k] = v
+        net.load_pretrained(new_sd)
+        # net.frezze_some_layers()
+
     if args.checkpoint != None:
         checkpoint = torch.load(args.checkpoint)
         # new_ckpt = modify_checkpoint(checkpoint['state_dict'])

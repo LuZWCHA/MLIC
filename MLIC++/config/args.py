@@ -120,6 +120,13 @@ def train_options():
         help="pretrained model path"
     )
     parser.add_argument(
+        "-p",
+        "--pretrained",
+        default=None,
+        type=str,
+        help="pretrained model path"
+    )
+    parser.add_argument(
         '--world_size',
         default=1,
         type=int,
