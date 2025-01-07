@@ -24,26 +24,6 @@ from models import *
 import random
 from ddp import *
 
-# def demo_basic(rank, world_size):
-#     print(f"Running basic DDP example on rank {rank}.")
-#     setup(rank, world_size)
-
-#     # create model and move it to GPU with id rank
-#     model = ToyModel().to(rank)
-#     ddp_model = DDP(model, device_ids=[rank])
-
-#     loss_fn = nn.MSELoss()
-#     optimizer = optim.SGD(ddp_model.parameters(), lr=0.001)
-
-#     optimizer.zero_grad()
-#     outputs = ddp_model(torch.randn(20, 10))
-#     labels = torch.randn(20, 5).to(rank)
-#     loss_fn(outputs, labels).backward()
-#     optimizer.step()
-
-#     cleanup()
-#     print(f"Finished running basic DDP example on rank {rank}.")
-
 def parse_gpu_ids(gpu_ids_str):
     # 替换中文逗号为英文逗号
     gpu_ids_str = gpu_ids_str.replace('，', ',')
@@ -225,38 +205,43 @@ def main():
             amp=amp
         )
         
+        
         if local_rank <= 0:
             save_dir = os.path.join('./experiments', args.experiment, 'val_images', '%03d' % (epoch + 1))
             # Test on gpuid=0
             loss = test_one_epoch(epoch, test_dataloader, net, criterion, save_dir, logger_val, tb_logger)
-            dist.barrier()
+            
+            if isinstance(net, DDP):
+                net.module.update(force=True)
+            else:
+                net.update(force=True)
+            
+            if args.save:
+                is_best = loss < best_loss
+                best_loss = min(loss, best_loss)
+                save_checkpoint(
+                    {
+                        "epoch": epoch + 1,
+                        "state_dict": net.module.state_dict() if isinstance(net, DDP) else net.state_dict(),
+                        "loss": loss,
+                        "optimizer": optimizer.state_dict(),
+                        "aux_optimizer": aux_optimizer.state_dict(),
+                        "lr_scheduler": lr_scheduler.state_dict(),
+                    },
+                    is_best,
+                    os.path.join('./experiments', args.experiment, 'checkpoints', "checkpoint_%03d.pth.tar" % (epoch + 1))
+                )
+                if is_best:
+                    logger_val.info('best checkpoint saved.')
+                    
         else:
-            dist.barrier()
+            if isinstance(net, DDP):
+                net.module.update(force=True)
+            else:
+                net.update(force=True)
             
         lr_scheduler.step()
-        
-        if isinstance(net, DDP):
-            net.module.update(force=True)
-        else:
-            net.update(force=True)
-        
-        if args.save and local_rank <= 0:
-            is_best = loss < best_loss
-            best_loss = min(loss, best_loss)
-            save_checkpoint(
-                {
-                    "epoch": epoch + 1,
-                    "state_dict": net.module.state_dict() if isinstance(net, DDP) else net.state_dict(),
-                    "loss": loss,
-                    "optimizer": optimizer.state_dict(),
-                    "aux_optimizer": aux_optimizer.state_dict(),
-                    "lr_scheduler": lr_scheduler.state_dict(),
-                },
-                is_best,
-                os.path.join('./experiments', args.experiment, 'checkpoints', "checkpoint_%03d.pth.tar" % (epoch + 1))
-            )
-            if is_best:
-                logger_val.info('best checkpoint saved.')
+        dist.barrier()
 
 if __name__ == '__main__':
     main()

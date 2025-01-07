@@ -112,7 +112,7 @@ def test_one_epoch(epoch, test_dataloader, model, criterion, save_dir, logger_va
     lpips_loss = AverageMeter()
     ms_ssim = AverageMeter()
     avg_dists = AverageMeter()
-
+    
     with torch.no_grad():
         for i, d in enumerate(test_dataloader):
             d = d.to(device)
