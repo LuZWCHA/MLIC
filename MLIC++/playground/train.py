@@ -4,6 +4,7 @@ import logging
 from PIL import ImageFile, Image
 import math
 import torch
+import torch.distributed
 import torch.nn as nn
 import torch.optim as optim
 import torch.nn.functional as F
@@ -12,7 +13,7 @@ from torch.utils.data import DataLoader
 from torchvision import transforms
 from compressai.datasets import ImageFolder
 from utils.logger import setup_logger
-from utils.utils import CustomDataParallel, save_checkpoint
+from utils.utils import get_system_info_str, save_checkpoint
 from utils.optimizers import configure_optimizers
 from utils.training import train_one_epoch
 from utils.testing import test_one_epoch
@@ -21,7 +22,43 @@ from config.args import train_options
 from config.config import model_config
 from models import *
 import random
+from ddp import *
 
+# def demo_basic(rank, world_size):
+#     print(f"Running basic DDP example on rank {rank}.")
+#     setup(rank, world_size)
+
+#     # create model and move it to GPU with id rank
+#     model = ToyModel().to(rank)
+#     ddp_model = DDP(model, device_ids=[rank])
+
+#     loss_fn = nn.MSELoss()
+#     optimizer = optim.SGD(ddp_model.parameters(), lr=0.001)
+
+#     optimizer.zero_grad()
+#     outputs = ddp_model(torch.randn(20, 10))
+#     labels = torch.randn(20, 5).to(rank)
+#     loss_fn(outputs, labels).backward()
+#     optimizer.step()
+
+#     cleanup()
+#     print(f"Finished running basic DDP example on rank {rank}.")
+
+def parse_gpu_ids(gpu_ids_str):
+    # 替换中文逗号为英文逗号
+    gpu_ids_str = gpu_ids_str.replace('，', ',')
+    # 按逗号分割
+    gpu_ids_list = gpu_ids_str.split(',')
+    # 去除每个元素的空白并转换为整数
+    gpu_ids = []
+    for gpu_id_str in gpu_ids_list:
+        gpu_id = gpu_id_str.strip()
+        if gpu_id:
+            try:
+                gpu_ids.append(int(gpu_id))
+            except ValueError:
+                print(f"Warning: '{gpu_id}' is not a valid integer and will be ignored.")
+    return gpu_ids
 
 def main():
     torch.backends.cudnn.benchmark = True
@@ -31,16 +68,18 @@ def main():
     args = train_options()
     config = model_config(args.model_name)
 
-    os.environ['CUDA_VISIBLE_DEVICES'] = str(args.gpu_id)
+    gpu_ids = parse_gpu_ids(args.gpu_id)
+    os.environ['CUDA_VISIBLE_DEVICES'] = ",".join(map(str, gpu_ids))
     device = "cuda" if args.cuda and torch.cuda.is_available() else "cpu"
-
+    amp = args.amp
+    
+    ddp_enable = args.cuda and torch.cuda.device_count() > 1 and len(gpu_ids) > 0
+    
     if args.seed is not None:
-    #     seed = args.seed
-    # else:
         seed = 100 * random.random()
     torch.manual_seed(seed)
     random.seed(seed)
-
+    
     if not os.path.exists(os.path.join('./experiments', args.experiment)):
         os.makedirs(os.path.join('./experiments', args.experiment))
 
@@ -66,12 +105,31 @@ def main():
     train_dataset = ImageFolder(args.dataset, split="train/openimagev7/testset", transform=train_transforms)
     test_dataset = ImageFolder(args.dataset, split="test", transform=test_transforms)
 
+    
+    train_sampler = test_sampler =  None
+    local_rank = -1
+    if ddp_enable:
+        local_rank = int(os.environ["LOCAL_RANK"]) ## DDP
+        torch.cuda.set_device(local_rank)
+        dist.init_process_group(backend='nccl')
+        device = torch.device("cuda", local_rank)
+
+    if local_rank <= 0:
+        logger_train.info(get_system_info_str())
+        logger_train.info(f"DDP: {ddp_enable}")
+        
+    if ddp_enable:
+        from torch.utils.data.distributed import DistributedSampler ## DDP
+        train_sampler = DistributedSampler(train_dataset)
+        # test_sampler = DistributedSampler(test_dataset)
+    
     train_dataloader = DataLoader(
         train_dataset,
         batch_size=args.batch_size,
         num_workers=args.num_workers,
-        shuffle=True,
+        shuffle=False,
         pin_memory=(device == "cuda"),
+        sampler=train_sampler
     )
 
     test_dataloader = DataLoader(
@@ -80,6 +138,7 @@ def main():
         num_workers=args.num_workers,
         shuffle=False,
         pin_memory=(device == "cuda"),
+        # sampler=test_sampler
     )
     
     from models.model_loader import get_model
@@ -89,6 +148,18 @@ def main():
     optimizer, aux_optimizer = configure_optimizers(net, args)
     lr_scheduler = optim.lr_scheduler.MultiStepLR(optimizer, milestones=[80, 100], gamma=0.1)
     criterion = RateDistortionLoss(lmbda=args.lmbda, metrics=args.metrics)
+
+
+    if args.pretrained != None:
+        checkpoint = torch.load(args.pretrained)
+        # new_ckpt = modify_checkpoint(checkpoint['state_dict'])
+        new_sd = dict()
+        for k, v in checkpoint['state_dict'].items():
+            k: str
+            while k.startswith("module."):
+                k = k[7:]
+            new_sd[k] = v
+        net.load_pretrained(new_sd)
 
     if args.checkpoint != None:
         checkpoint = torch.load(args.checkpoint)
@@ -116,20 +187,28 @@ def main():
         start_epoch = 0
         best_loss = 1e10
         current_step = 0
-    if args.cuda and torch.cuda.device_count() > 1:
-        net = CustomDataParallel(net).to(device)
+    if ddp_enable:
+        net = DDP(net, device_ids=[local_rank])
+        
+        
     # start_epoch = 0
     # best_loss = 1e10
     # current_step = 0
-
-    logger_train.info(args)
-    logger_train.info(config)
-    logger_train.info(net)
-    logger_train.info(optimizer)
+    
+        
     optimizer.param_groups[0]['lr'] = args.learning_rate
+    local_rank = dist.get_rank()
+    
+    if local_rank <= 0:
+        logger_train.info(args)
+        logger_train.info(config)
+        logger_train.info(net)
+        logger_train.info(optimizer)
+        logger_train.info(f"Learning rate: {optimizer.param_groups[0]['lr']}")
     
     for epoch in range(start_epoch, args.epochs):
-        logger_train.info(f"Learning rate: {optimizer.param_groups[0]['lr']}")
+        if ddp_enable:
+            train_dataloader.sampler.set_epoch(epoch)
         
         current_step = train_one_epoch(
             net,
@@ -141,22 +220,33 @@ def main():
             args.clip_max_norm,
             logger_train,
             tb_logger,
-            current_step
+            current_step,
+            rank=local_rank,
+            amp=amp
         )
-
-        save_dir = os.path.join('./experiments', args.experiment, 'val_images', '%03d' % (epoch + 1))
-        loss = test_one_epoch(epoch, test_dataloader, net, criterion, save_dir, logger_val, tb_logger)
-
+        
+        if local_rank <= 0:
+            save_dir = os.path.join('./experiments', args.experiment, 'val_images', '%03d' % (epoch + 1))
+            # Test on gpuid=0
+            loss = test_one_epoch(epoch, test_dataloader, net, criterion, save_dir, logger_val, tb_logger)
+            dist.barrier()
+        else:
+            dist.barrier()
+            
         lr_scheduler.step()
-        is_best = loss < best_loss
-        best_loss = min(loss, best_loss)
-
-        net.update(force=True)
-        if args.save:
+        
+        if isinstance(net, DDP):
+            net.module.update(force=True)
+        else:
+            net.update(force=True)
+        
+        if args.save and local_rank <= 0:
+            is_best = loss < best_loss
+            best_loss = min(loss, best_loss)
             save_checkpoint(
                 {
                     "epoch": epoch + 1,
-                    "state_dict": net.module.state_dict() if isinstance(net, CustomDataParallel) else net.state_dict(),
+                    "state_dict": net.module.state_dict() if isinstance(net, DDP) else net.state_dict(),
                     "loss": loss,
                     "optimizer": optimizer.state_dict(),
                     "aux_optimizer": aux_optimizer.state_dict(),
@@ -170,3 +260,4 @@ def main():
 
 if __name__ == '__main__':
     main()
+    # torch.multiprocessing.spawn(main, args=(), nprocs=2, join=True)

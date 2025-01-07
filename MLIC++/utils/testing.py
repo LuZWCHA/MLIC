@@ -6,6 +6,7 @@ import torch.nn.functional as F
 import torchvision
 from utils.metrics import compute_metrics
 from utils.utils import *
+from playground.ddp import DDP
 
 
 def test_one_epoch_vbr(epoch, test_dataloader, model, criterion, save_dir, logger_val, tb_logger):
@@ -127,12 +128,15 @@ def test_one_epoch(epoch, test_dataloader, model, criterion, save_dir, logger_va
             img_pad = F.pad(d, (0, pad_w, 0, pad_h), mode='constant', value=0)
     
             out_net = model(img_pad)
+            # remove padding
             out_net['x_hat'] = out_net['x_hat'][:, :, :H, :W]
+            
             out_criterion = criterion(out_net, d)
 
-            aux_loss.update(model.aux_loss())
+            aux_loss.update(model.module.aux_loss() if isinstance(model, DDP) else model.aux_loss())
             bpp_loss.update(out_criterion["bpp_loss"])
             loss.update(out_criterion["loss"])
+            
             if out_criterion["mse_loss"] is not None:
                 mse_loss.update(out_criterion["mse_loss"])
             if out_criterion["ms_ssim_loss"] is not None:

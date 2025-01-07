@@ -42,11 +42,12 @@ def get_gaussian_kernel(kernel_size=3, sigma=1, channels=3):
 
 from torch.cuda.amp.grad_scaler import GradScaler
 from torch.cuda.amp.autocast_mode import autocast
+from compressai.models import CompressionModel
 
 def train_one_epoch(
-    model, criterion, train_dataloader, optimizer, aux_optimizer, epoch, clip_max_norm, logger_train, tb_logger, current_step
+    model, criterion, train_dataloader, optimizer, aux_optimizer, epoch, clip_max_norm, logger_train, tb_logger, current_step, rank=1, amp=True
 ):
-    amp = True
+    
     scaler = GradScaler(enabled=amp)
     model.train()
     device = next(model.parameters()).device
@@ -71,44 +72,46 @@ def train_one_epoch(
         # optimizer.step()
         scaler.step(optimizer)
 
-        aux_loss = model.aux_loss()
+        aux_loss = model.aux_loss() if isinstance(model, CompressionModel) else model.module.aux_loss()
         scaler.scale(aux_loss).backward()
         # aux_optimizer.step()
         scaler.step(aux_optimizer)
         scaler.update()
 
         current_step += 1
-        if current_step % 20 == 0:
-            tb_logger.add_scalar('{}'.format('[train]: loss'), out_criterion["loss"].item(), current_step)
-            tb_logger.add_scalar('{}'.format('[train]: bpp_loss'), out_criterion["bpp_loss"].item(), current_step)
-            tb_logger.add_scalar('{}'.format('[train]: lr'), optimizer.param_groups[0]['lr'], current_step)
-            tb_logger.add_scalar('{}'.format('[train]: aux_loss'), aux_loss.item(), current_step)
-            if out_criterion["mse_loss"] is not None:
-                tb_logger.add_scalar('{}'.format('[train]: mse_loss'), out_criterion["mse_loss"].item(), current_step)
-            if out_criterion["ms_ssim_loss"] is not None:
-                tb_logger.add_scalar('{}'.format('[train]: ms_ssim_loss'), out_criterion["ms_ssim_loss"].item(), current_step)
+        
+        if rank <= 0:
+            if current_step % 20 == 0:
+                tb_logger.add_scalar('{}'.format('[train]: loss'), out_criterion["loss"].item(), current_step)
+                tb_logger.add_scalar('{}'.format('[train]: bpp_loss'), out_criterion["bpp_loss"].item(), current_step)
+                tb_logger.add_scalar('{}'.format('[train]: lr'), optimizer.param_groups[0]['lr'], current_step)
+                tb_logger.add_scalar('{}'.format('[train]: aux_loss'), aux_loss.item(), current_step)
+                if out_criterion["mse_loss"] is not None:
+                    tb_logger.add_scalar('{}'.format('[train]: mse_loss'), out_criterion["mse_loss"].item(), current_step)
+                if out_criterion["ms_ssim_loss"] is not None:
+                    tb_logger.add_scalar('{}'.format('[train]: ms_ssim_loss'), out_criterion["ms_ssim_loss"].item(), current_step)
 
-        if i % 50 == 0:
-            if out_criterion["ms_ssim_loss"] is None:
-                logger_train.info(
-                    f"Train epoch {epoch}: ["
-                    f"{i*len(d):5d}/{len(train_dataloader.dataset)}"
-                    f" ({100. * i / len(train_dataloader):.0f}%)] "
-                    f'Loss: {out_criterion["loss"].item():.4f} | '
-                    f'MSE loss: {out_criterion["mse_loss"].item():.4f} | '
-                    f'Bpp loss: {out_criterion["bpp_loss"].item():.2f} | '
-                    f"Aux loss: {aux_loss.item():.2f}"
-                )
-            else:
-                logger_train.info(
-                    f"Train epoch {epoch}: ["
-                    f"{i*len(d):5d}/{len(train_dataloader.dataset)}"
-                    f" ({100. * i / len(train_dataloader):.0f}%)] "
-                    f'Loss: {out_criterion["loss"].item():.4f} | '
-                    f'MS-SSIM loss: {out_criterion["ms_ssim_loss"].item():.4f} | '
-                    f'Bpp loss: {out_criterion["bpp_loss"].item():.2f} | '
-                    f"Aux loss: {aux_loss.item():.2f}"
-                )
+            if i % 20 == 0:
+                if out_criterion["ms_ssim_loss"] is None:
+                    logger_train.info(
+                        f"Train epoch {epoch}: ["
+                        f"{i*len(d):5d}/{len(train_dataloader.dataset)}"
+                        f" ({100. * i / len(train_dataloader):.0f}%)] "
+                        f'Loss: {out_criterion["loss"].item():.4f} | '
+                        f'MSE loss: {out_criterion["mse_loss"].item():.4f} | '
+                        f'Bpp loss: {out_criterion["bpp_loss"].item():.2f} | '
+                        f"Aux loss: {aux_loss.item():.2f}"
+                    )
+                else:
+                    logger_train.info(
+                        f"Train epoch {epoch}: ["
+                        f"{i*len(d):5d}/{len(train_dataloader.dataset)}"
+                        f" ({100. * i / len(train_dataloader):.0f}%)] "
+                        f'Loss: {out_criterion["loss"].item():.4f} | '
+                        f'MS-SSIM loss: {out_criterion["ms_ssim_loss"].item():.4f} | '
+                        f'Bpp loss: {out_criterion["bpp_loss"].item():.2f} | '
+                        f"Aux loss: {aux_loss.item():.2f}"
+                    )
 
     return current_step
 

@@ -12,6 +12,11 @@ def train_options():
         help="Experiment name"
     ) 
     parser.add_argument(
+        "--amp",
+        action="store_true",
+        help="AMP"
+    ) 
+    parser.add_argument(
         "-m",
         "--model-name",
         default="MLICPP_L",
@@ -86,8 +91,8 @@ def train_options():
     )
     parser.add_argument(
         "--gpu_id",
-        type=int,
-        default=0,
+        type=str,
+        default="0,1",
         help="GPU ID"
     )
     parser.add_argument(
