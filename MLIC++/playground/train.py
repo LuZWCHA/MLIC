@@ -1,6 +1,7 @@
 import os
 import random
 import logging
+import time
 from PIL import ImageFile, Image
 import math
 import torch
@@ -90,17 +91,19 @@ def main():
     local_rank = -1
     if ddp_enable:
         local_rank = int(os.environ["LOCAL_RANK"]) ## DDP
+        logger_train.info(os.environ)
         torch.cuda.set_device(local_rank)
         dist.init_process_group(backend='nccl')
         device = torch.device("cuda", local_rank)
-
+        
+        from torch.utils.data.distributed import DistributedSampler ## DDP
+        train_sampler = DistributedSampler(train_dataset)
+        
+    logger_train.info(f"Local Rank: {local_rank}")
     if local_rank <= 0:
         logger_train.info(get_system_info_str())
         logger_train.info(f"DDP: {ddp_enable}")
-        
-    if ddp_enable:
-        from torch.utils.data.distributed import DistributedSampler ## DDP
-        train_sampler = DistributedSampler(train_dataset)
+
         # test_sampler = DistributedSampler(test_dataset)
     
     train_dataloader = DataLoader(
@@ -168,7 +171,7 @@ def main():
         best_loss = 1e10
         current_step = 0
     if ddp_enable:
-        net = DDP(net, device_ids=[local_rank])
+        net = DDP(net, device_ids=[local_rank]).to(device)
         
         
     # start_epoch = 0
@@ -189,7 +192,7 @@ def main():
     for epoch in range(start_epoch, args.epochs):
         if ddp_enable:
             train_dataloader.sampler.set_epoch(epoch)
-        
+        current_step = 0
         current_step = train_one_epoch(
             net,
             criterion,
@@ -205,11 +208,10 @@ def main():
             amp=amp
         )
         
-        
         if local_rank <= 0:
             save_dir = os.path.join('./experiments', args.experiment, 'val_images', '%03d' % (epoch + 1))
             # Test on gpuid=0
-            loss = test_one_epoch(epoch, test_dataloader, net, criterion, save_dir, logger_val, tb_logger)
+            loss = test_one_epoch(epoch, test_dataloader, net.module if isinstance(net, DDP) else net, criterion, save_dir, logger_val, tb_logger)
             
             if isinstance(net, DDP):
                 net.module.update(force=True)
@@ -239,9 +241,11 @@ def main():
                 net.module.update(force=True)
             else:
                 net.update(force=True)
-            
+
         lr_scheduler.step()
-        dist.barrier()
+        print(f"{dist.get_rank()}: Waiting ...")
+        if ddp_enable:
+            dist.barrier()
 
 if __name__ == '__main__':
     main()
