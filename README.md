@@ -1,3 +1,14 @@
+# Install
+pip
+```
+# python>=3.8
+pip install -r requirements.txt
+```
+conda
+```
+conda env create -f environment.yml
+```
+
 # MLIC Series [ACMMM 2023 / NCW ICML 2023]
 
 This repo contains the official implementation of MLIC <sup> ++ </sup>. 
