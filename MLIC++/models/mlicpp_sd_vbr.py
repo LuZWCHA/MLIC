@@ -11,7 +11,7 @@ from modules.transform import *
 from compressai.entropy_models import EntropyBottleneck, EntropyBottleneckVbr
 
 
-class MLICPlusPlusVbr(CompressionModel):
+class MLICPlusPlusSDVbr(CompressionModel):
     def __init__(self, config, vr_entbttlnck=None, **kwargs):
         super().__init__(config.N, **kwargs)
         N = config.N
@@ -28,10 +28,14 @@ class MLICPlusPlusVbr(CompressionModel):
         self.slice_ch = slice_ch
 
         self.g_a = AnalysisTransform(N=N, M=M)
-        self.g_s = SynthesisTransform(N=N, M=M)
-
         self.h_a = HyperAnalysis(M=M, N=N)
-        self.h_s = HyperSynthesis(M=M, N=N)
+
+        # reload
+        self.g_s = SynthesisTransform(N=N // 4, M=M)
+        self.h_s = HyperSynthesis(M=M // 4, N=N)
+
+        M = M // 4
+        N = N // 4
 
         # Gussian Conditional
         self.gaussian_conditional = GaussianConditional(None)
@@ -115,6 +119,18 @@ class MLICPlusPlusVbr(CompressionModel):
                 nn.Softplus(),
             )
             self.lower_bound_zqstep = LowerBound(0.5)
+
+    def mmo_parameters(self):
+        share_p = []
+        sp_p = []
+        
+        for i, v in self.named_parameters():
+            if "gain" in i:
+                sp_p.append(v)
+            else:
+                share_p.append(v)
+        
+        return share_p, sp_p
 
     def _raise_stage_error(self, stage):
         raise ValueError(f"Invalid stage (stage={stage}) parameter for this model.")
@@ -1134,18 +1150,6 @@ class MLICPlusPlusVbr(CompressionModel):
             state_dict,
         )
         super().load_state_dict(state_dict, strict=False)
-
-    def mmo_parameters(self):
-        share_p = []
-        sp_p = []
-        
-        for i, v in self.named_parameters():
-            if "gain" in i or "Gain" in i:
-                sp_p.append(v)
-            else:
-                share_p.append(v)
-        
-        return share_p, sp_p
 
     # def update(self, scale_table=None, force=False):
     #     if scale_table is None:

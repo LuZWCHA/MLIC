@@ -26,8 +26,13 @@ def test_one_epoch_vbr(epoch, test_dataloader, model, criterion, save_dir, logge
 
         with torch.no_grad():
             for i, d in enumerate(test_dataloader):
-                d = d.to(device)
-                B, C, H, W = d.shape
+                if isinstance(torch.Tensor):
+                    img = d.to(device)
+                elif isinstance(dict):
+                    img = d["image"].to(device)
+                    img_paths = d["path"]
+        
+                B, C, H, W = img.shape
 
                 pad_h = 0
                 pad_w = 0
@@ -36,11 +41,11 @@ def test_one_epoch_vbr(epoch, test_dataloader, model, criterion, save_dir, logge
                 if W % 64 != 0:
                     pad_w = 64 * (W // 64 + 1) - W
 
-                img_pad = F.pad(d, (0, pad_w, 0, pad_h), mode='constant', value=0)
+                img_pad = F.pad(img, (0, pad_w, 0, pad_h), mode='constant', value=0)
         
                 out_net = model(img_pad, s=level)
                 out_net['x_hat'] = out_net['x_hat'][:, :, :H, :W]
-                out_criterion = criterion(out_net, d)
+                out_criterion = criterion(out_net, img)
 
                 aux_loss.update(model.aux_loss())
                 bpp_loss.update(out_criterion["bpp_loss"])
@@ -51,7 +56,7 @@ def test_one_epoch_vbr(epoch, test_dataloader, model, criterion, save_dir, logge
                     ms_ssim_loss.update(out_criterion["ms_ssim_loss"])
 
                 rec = torch2img(out_net['x_hat'])
-                img = torch2img(d)
+                img = torch2img(img)
                 p, m, lpips_m, dists = compute_metrics(rec, img)
                 psnr.update(p)
                 ms_ssim.update(m)
@@ -115,8 +120,12 @@ def test_one_epoch(epoch, test_dataloader, model, criterion, save_dir, logger_va
     
     with torch.no_grad():
         for i, d in enumerate(test_dataloader):
-            d = d.to(device)
-            B, C, H, W = d.shape
+            if isinstance(torch.Tensor):
+                img = d.to(device)
+            elif isinstance(dict):
+                img = d["image"].to(device)
+                img_paths = d["path"]
+            B, C, H, W = img.shape
 
             pad_h = 0
             pad_w = 0
@@ -125,13 +134,13 @@ def test_one_epoch(epoch, test_dataloader, model, criterion, save_dir, logger_va
             if W % 64 != 0:
                 pad_w = 64 * (W // 64 + 1) - W
 
-            img_pad = F.pad(d, (0, pad_w, 0, pad_h), mode='constant', value=0)
+            img_pad = F.pad(img, (0, pad_w, 0, pad_h), mode='constant', value=0)
     
             out_net = model(img_pad)
             # remove padding
             out_net['x_hat'] = out_net['x_hat'][:, :, :H, :W]
             
-            out_criterion = criterion(out_net, d)
+            out_criterion = criterion(out_net, img)
 
             aux_loss.update(model.module.aux_loss() if isinstance(model, DDP) else model.aux_loss())
             bpp_loss.update(out_criterion["bpp_loss"])
@@ -143,7 +152,7 @@ def test_one_epoch(epoch, test_dataloader, model, criterion, save_dir, logger_va
                 ms_ssim_loss.update(out_criterion["ms_ssim_loss"])
 
             rec = torch2img(out_net['x_hat'])
-            img = torch2img(d)
+            img = torch2img(img)
             p, m, lpips_m, dists = compute_metrics(rec, img)
             psnr.update(p)
             ms_ssim.update(m)
@@ -342,7 +351,12 @@ def test_model(test_dataloader, net, logger_test, save_dir, epoch):
     get_macs(net)
 
     with torch.no_grad():
-        for i, img in enumerate(test_dataloader):
+        for i, d in enumerate(test_dataloader):
+            if isinstance(torch.Tensor):
+                img = d.to(device)
+            elif isinstance(dict):
+                img = d["image"].to(device)
+                img_paths = d["path"]
             bpp = 1e6
             B, C, ORI_H, ORI_W = img.shape
             ori_img = img.to(device)
@@ -440,7 +454,14 @@ def test_model_vbr(test_dataloader, net, logger_test, save_dir, epoch, custom_sc
     get_macs(net)
 
     with torch.no_grad():
-        for i, img in enumerate(test_dataloader):
+        for i, d in enumerate(test_dataloader):
+            
+            if isinstance(torch.Tensor):
+                img = d.to(device)
+            elif isinstance(dict):
+                img = d["image"].to(device)
+                img_paths = d["path"]
+            
             bpp = 1e6
             B, C, ORI_H, ORI_W = img.shape
             ori_img = img.to(device)

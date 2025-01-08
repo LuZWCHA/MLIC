@@ -6,6 +6,7 @@ import torch.nn.functional as F
 import torch
 import math
 import torch.nn as nn
+from playground.ddp import *
 
 def get_gaussian_kernel(kernel_size=3, sigma=1, channels=3):
     # Create a x, y coordinate grid of shape (kernel_size, kernel_size, 2)
@@ -53,17 +54,21 @@ def train_one_epoch(
     device = next(model.parameters()).device
     gauss_k = get_gaussian_kernel().to(device)
     for i, d in enumerate(train_dataloader):
-        d = d.to(device)
-        # SR
-        # blur_d = gauss_k(d)
-
+        if isinstance(torch.Tensor):
+            img = d.to(device)
+        elif isinstance(dict):
+            img = d["image"].to(device)
+            img_paths = d["path"]
+        
         optimizer.zero_grad()
         aux_optimizer.zero_grad()
         
         with autocast(enabled=amp):
-            out_net = model(d)
+            # SR
+            # blur_d = gauss_k(d)
+            out_net = model(img)
 
-            out_criterion = criterion(out_net, d)
+            out_criterion = criterion(out_net, img)
 
         scaler.scale(out_criterion["loss"]).backward()
 
@@ -118,128 +123,131 @@ def train_one_epoch(
 import torch.optim as optim
 from torch.autograd import grad
 
-class MinNormSolver:
-    @staticmethod
-    def find_min_norm_element(grads, max_iter=100, tol=1e-5):
-        num_tasks = len(grads)
-        device = grads[0].device
-        alpha = torch.ones(num_tasks, device=device) / num_tasks
-        grads_tensor = torch.stack(grads)
-        norms_sq_gi = torch.sum(grads_tensor ** 2, dim=1)
-
-        for iteration in range(max_iter):
-            grad = torch.matmul(alpha, grads_tensor)
-            # norms = torch.norm(grads_tensor - grad, dim=1)
-            norms_sq = norms_sq_gi - 2 * (grads_tensor @ grad) + torch.sum(grad ** 2)
-            min_norm_dir = torch.argmin(norms_sq)
-            step_size = 2.0 / (iteration + 2.0)
-            new_alpha = torch.zeros(num_tasks, device=device)
-            new_alpha[min_norm_dir] = 1.0
-            alpha = (1 - step_size) * alpha + step_size * new_alpha
-            if torch.norm(new_alpha - alpha) < tol:
-                break
-        return alpha
+def MinNormSolver(gradients, max_iter=10):
+    N = len(gradients)
+    alpha = torch.ones(N, device=gradients[0].device) / N
+    for _ in range(max_iter):
+        combined = torch.sum(alpha[:, None] * gradients, dim=0)
+        dot_products = torch.sum(combined * gradients, dim=1)
+        min_idx = torch.argmin(dot_products)
+        direction = torch.zeros_like(alpha)
+        direction[min_idx] = 1.0 - alpha[min_idx]
+        alpha += 0.5 * direction  # Update rule, can be adjusted
+        alpha = torch.clamp(alpha, min=0.0)
+        alpha /= alpha.sum()
+    return alpha
 
 
 from models.mlicpp_vbr import MLICPlusPlusVbr
 def train_one_epoch_mmo(
-    model: MLICPlusPlusVbr, criterion, train_dataloader, optimizer, aux_optimizer, epoch, clip_max_norm, logger_train, tb_logger, current_step
+    model: MLICPlusPlusVbr, criterion, train_dataloader, optimizer_theta, optimizer_phi, aux_optimizer, epoch, clip_max_norm, logger_train, tb_logger, current_step, rank=1, world_size=1, amp=False
 ):
-    amp = False
     scaler = GradScaler(enabled=amp)
     model.train()
     device = next(model.parameters()).device
     gauss_k = get_gaussian_kernel().to(device)
     for i, d in enumerate(train_dataloader):
-        d = d.to(device)
+        if isinstance(torch.Tensor):
+            img = d.to(device)
+        elif isinstance(dict):
+            img = d["image"].to(device)
+            img_paths = d["path"]
+        
         # SR
         # blur_d = gauss_k(d)
 
-        # optimizer.zero_grad()
         aux_optimizer.zero_grad()
 
+        # 共享参数
+        optimizer_theta.zero_grad()
+        
+        gradients_theta = []
+        N = model.levels
+        
+        shared_parameters, _ = model.mmo_parameters()
+        gradients_shared = []
         # 计算每个任务的损失和梯度
-        losses = []
-        grads_theta = []
-        # grads_gain = []
-        # with autocast(enabled=amp):
-        for s, lmbda in enumerate(model.lmbda):
-            out_net = model.forward(d, stage=2, s=s)
-            criterion.set_lmbda(lmbda)
-            out_criterion = criterion(out_net, d)
+        for i in range(N):
+            optimizer_phi[i].zero_grad()
+            out_net = model(img, i)
+            out_criterion = criterion(out_net, img)
+            
             loss = out_criterion["loss"]
-            losses.append(loss)
+            scaler.scale(loss).backward(retain_graph=True)
+            
+            # Collect gradients for θ
+            gradients_theta = [sp.grad.detach().clone() for sp in shared_parameters]
+            
+            # Update φi
+            scaler.step(optimizer_phi[i])
+            gradients_shared.append(gradients_theta)
+        
+        # Flatten gradients for easier handling
+        flattened_gradients = [torch.cat([g.flatten() for g in grad_list]) for grad_list in gradients_shared]
+        
+        # Use MinNormSolver to find optimal alpha coefficients
+        alpha = MinNormSolver(flattened_gradients)
 
-        # 计算每个任务的梯度
-        grads_theta = []
-        for i in range(len(losses)):
-            loss = losses[i]
-            grad_theta_i = torch.autograd.grad(loss, model.parameters(), retain_graph=True, allow_unused=True)
-            grads_theta.append(torch.cat([g.view(-1) for g in grad_theta_i]))
+        # Combine gradients
+        combined_gradient = sum(alpha[i] * flattened_gradients[i] for i in range(model.levels))
         
-        # 求解最小范数权重
-        alpha = MinNormSolver.find_min_norm_element(grads_theta, max_iter=5, tol=5e-4)
-        
-        # 计算加权梯度
-        weighted_grad = torch.zeros_like(grads_theta[0])
-        for i in range(len(losses)):
-            weighted_grad += alpha[i] * grads_theta[i]
-        
-        # 更新共享参数 theta
+        # Unflatten combined gradient and set to shared parameters
         idx = 0
-        with torch.no_grad():
-            for param in model.parameters():
-                param_size = param.numel()
-                grad_slice = weighted_grad[idx:idx+param_size]
-                grad_slice = grad_slice.view(param.shape)
-                param.data -= optimizer.param_groups[0]['lr'] * grad_slice
-                idx += param_size
-
-        # scaler.scale(out_criterion["loss"]).backward()
+        for param in shared_parameters:
+            num_params = param.numel()
+            param.grad = combined_gradient[idx:idx+num_params].view(param.shape)
+            idx += num_params
+        
+        # Synchronize combined gradients across all processes
+        for param in shared_parameters:
+            dist.all_reduce(param.grad, op=dist.ReduceOp.SUM)
+            param.grad /= world_size  # Average gradients
+        
+        # Step the optimizer for shared parameters
+        scaler.step(optimizer_theta)
 
         if clip_max_norm > 0:
             torch.nn.utils.clip_grad_norm_(model.parameters(), clip_max_norm)
-        # optimizer.step()
-        # scaler.step(optimizer)
 
-        aux_loss = model.aux_loss()
-        aux_loss.backward()
-        aux_optimizer.step()
-        # scaler.step(aux_optimizer)
-        # scaler.update()
+        aux_loss = model.aux_loss() if isinstance(model, CompressionModel) else model.module.aux_loss()
+        scaler.scale(aux_loss).backward()
+        # aux_optimizer.step()
+        scaler.step(aux_optimizer)
+        scaler.update()
 
         current_step += 1
-        if current_step % 20 == 0:
-            tb_logger.add_scalar('{}'.format('[train]: loss'), out_criterion["loss"].item(), current_step)
-            tb_logger.add_scalar('{}'.format('[train]: bpp_loss'), out_criterion["bpp_loss"].item(), current_step)
-            tb_logger.add_scalar('{}'.format('[train]: lr'), optimizer.param_groups[0]['lr'], current_step)
-            tb_logger.add_scalar('{}'.format('[train]: aux_loss'), aux_loss.item(), current_step)
-            if out_criterion["mse_loss"] is not None:
-                tb_logger.add_scalar('{}'.format('[train]: mse_loss'), out_criterion["mse_loss"].item(), current_step)
-            if out_criterion["ms_ssim_loss"] is not None:
-                tb_logger.add_scalar('{}'.format('[train]: ms_ssim_loss'), out_criterion["ms_ssim_loss"].item(), current_step)
+        if rank <= 0:
+            if current_step % 20 == 0:
+                tb_logger.add_scalar('{}'.format('[train]: loss'), out_criterion["loss"].item(), current_step)
+                tb_logger.add_scalar('{}'.format('[train]: bpp_loss'), out_criterion["bpp_loss"].item(), current_step)
+                tb_logger.add_scalar('{}'.format('[train]: lr'), optimizer_theta.param_groups[0]['lr'], current_step)
+                tb_logger.add_scalar('{}'.format('[train]: aux_loss'), aux_loss.item(), current_step)
+                if out_criterion["mse_loss"] is not None:
+                    tb_logger.add_scalar('{}'.format('[train]: mse_loss'), out_criterion["mse_loss"].item(), current_step)
+                if out_criterion["ms_ssim_loss"] is not None:
+                    tb_logger.add_scalar('{}'.format('[train]: ms_ssim_loss'), out_criterion["ms_ssim_loss"].item(), current_step)
 
-        if i % 50 == 0:
-            if out_criterion["ms_ssim_loss"] is None:
-                logger_train.info(
-                    f"Train epoch {epoch}: ["
-                    f"{i*len(d):5d}/{len(train_dataloader.dataset)}"
-                    f" ({100. * i / len(train_dataloader):.0f}%)] "
-                    f'Loss: {out_criterion["loss"].item():.4f} | '
-                    f'MSE loss: {out_criterion["mse_loss"].item():.4f} | '
-                    f'Bpp loss: {out_criterion["bpp_loss"].item():.2f} | '
-                    f"Aux loss: {aux_loss.item():.2f}"
-                )
-            else:
-                logger_train.info(
-                    f"Train epoch {epoch}: ["
-                    f"{i*len(d):5d}/{len(train_dataloader.dataset)}"
-                    f" ({100. * i / len(train_dataloader):.0f}%)] "
-                    f'Loss: {out_criterion["loss"].item():.4f} | '
-                    f'MS-SSIM loss: {out_criterion["ms_ssim_loss"].item():.4f} | '
-                    f'Bpp loss: {out_criterion["bpp_loss"].item():.2f} | '
-                    f"Aux loss: {aux_loss.item():.2f}"
-                )
+            if i % 20 == 0:
+                if out_criterion["ms_ssim_loss"] is None:
+                    logger_train.info(
+                        f"Train epoch {epoch}: ["
+                        f"{i*len(d):5d}/{len(train_dataloader.dataset)}"
+                        f" ({100. * i / len(train_dataloader):.0f}%)] "
+                        f'Loss: {out_criterion["loss"].item():.4f} | '
+                        f'MSE loss: {out_criterion["mse_loss"].item():.4f} | '
+                        f'Bpp loss: {out_criterion["bpp_loss"].item():.2f} | '
+                        f"Aux loss: {aux_loss.item():.2f}"
+                    )
+                else:
+                    logger_train.info(
+                        f"Train epoch {epoch}: ["
+                        f"{i*len(d):5d}/{len(train_dataloader.dataset)}"
+                        f" ({100. * i / len(train_dataloader):.0f}%)] "
+                        f'Loss: {out_criterion["loss"].item():.4f} | '
+                        f'MS-SSIM loss: {out_criterion["ms_ssim_loss"].item():.4f} | '
+                        f'Bpp loss: {out_criterion["bpp_loss"].item():.2f} | '
+                        f"Aux loss: {aux_loss.item():.2f}"
+                    )
 
     return current_step
 

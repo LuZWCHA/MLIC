@@ -12,6 +12,8 @@ def get_model(model_name):
         model_cls = MLICPlusPlusSD
     elif model_name in ["MLICPP_S_VBR"]:
         model_cls = MLICPlusPlusVbr
+    elif model_name in ["MLICPP_M_SMALL_DEC_VBR"]:
+        model_cls = MLICPlusPlusSDVbr
 
 
     return model_cls(config=model_config_)

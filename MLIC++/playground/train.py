@@ -24,6 +24,7 @@ from config.config import model_config
 from models import *
 import random
 from ddp import *
+from playground.dataset import ImageFolder2
 
 def parse_gpu_ids(gpu_ids_str):
     # 替换中文逗号为英文逗号
@@ -83,8 +84,8 @@ def main():
         [transforms.ToTensor()]
     )
 
-    train_dataset = ImageFolder(args.dataset, split="train/openimagev7/testset", transform=train_transforms)
-    test_dataset = ImageFolder(args.dataset, split="test", transform=test_transforms)
+    train_dataset = ImageFolder2(args.dataset, split="train/openimagev7/testset", transform=train_transforms)
+    test_dataset = ImageFolder2(args.dataset, split="test", transform=test_transforms)
 
     
     train_sampler = test_sampler =  None
@@ -99,7 +100,7 @@ def main():
         from torch.utils.data.distributed import DistributedSampler ## DDP
         train_sampler = DistributedSampler(train_dataset)
         
-    logger_train.info(f"Local Rank: {local_rank}")
+    # logger_train.info(f"Local Rank: {local_rank}")
     if local_rank <= 0:
         logger_train.info(get_system_info_str())
         logger_train.info(f"DDP: {ddp_enable}")
@@ -144,6 +145,10 @@ def main():
             new_sd[k] = v
         net.load_pretrained(new_sd)
 
+
+    start_epoch = 0
+    best_loss = 1e10
+    current_step = 0
     if args.checkpoint != None:
         checkpoint = torch.load(args.checkpoint)
         # new_ckpt = modify_checkpoint(checkpoint['state_dict'])
@@ -155,21 +160,20 @@ def main():
             new_sd[k] = v
         net.load_state_dict(new_sd)
         # net.load_state_dict(checkpoint['state_dict'])
-        optimizer.load_state_dict(checkpoint['optimizer'])
-        aux_optimizer.load_state_dict(checkpoint['aux_optimizer'])
-        # lr_scheduler.load_state_dict(checkpoint['lr_scheduler'])
-        lr_scheduler = optim.lr_scheduler.MultiStepLR(optimizer, milestones=[450,550], gamma=0.1)
-        # lr_scheduler._step_count = checkpoint['lr_scheduler']['_step_count']
-        # lr_scheduler.last_epoch = checkpoint['lr_scheduler']['last_epoch']
-        # print(lr_scheduler.state_dict())
-        start_epoch = checkpoint['epoch']
-        best_loss = checkpoint['loss']
-        current_step = start_epoch * math.ceil(len(train_dataloader.dataset) / args.batch_size)
+        if args.resume:
+            optimizer.load_state_dict(checkpoint['optimizer'])
+            aux_optimizer.load_state_dict(checkpoint['aux_optimizer'])
+            # lr_scheduler.load_state_dict(checkpoint['lr_scheduler'])
+            lr_scheduler = optim.lr_scheduler.MultiStepLR(optimizer, milestones=[450,550], gamma=0.1)
+            # lr_scheduler._step_count = checkpoint['lr_scheduler']['_step_count']
+            # lr_scheduler.last_epoch = checkpoint['lr_scheduler']['last_epoch']
+            # print(lr_scheduler.state_dict())
+            start_epoch = checkpoint['epoch']
+            best_loss = checkpoint['loss']
+            current_step = start_epoch * math.ceil(len(train_dataloader.dataset) / args.batch_size)
+            
         checkpoint = None
-    else:
-        start_epoch = 0
-        best_loss = 1e10
-        current_step = 0
+
     if ddp_enable:
         net = DDP(net, device_ids=[local_rank]).to(device)
         

@@ -49,7 +49,7 @@ def model_config(model_name="MLICPP_S"):
             "context_window": 5,
             "act": nn.GELU,
         }) # 436.35 GMacs normal conv2d; 204.55 GMacs depthwise conv
-    elif model_name == "MLICPP_M_SMALL_DEC":
+    elif model_name in ["MLICPP_M_SMALL_DEC", "MLICPP_M_SMALL_DEC_VBR"]:
         config = Config({
             "N": 192,
             "M": 320,

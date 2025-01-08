@@ -15,6 +15,11 @@ def train_options():
         "--amp",
         action="store_true",
         help="AMP"
+    )  
+    parser.add_argument(
+        "--resume",
+        action="store_true",
+        help="Resume model and all other trainer"
     ) 
     parser.add_argument(
         "-m",
