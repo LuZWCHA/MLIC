@@ -26,9 +26,9 @@ def test_one_epoch_vbr(epoch, test_dataloader, model, criterion, save_dir, logge
 
         with torch.no_grad():
             for i, d in enumerate(test_dataloader):
-                if isinstance(torch.Tensor):
+                if isinstance(d, torch.Tensor):
                     img = d.to(device)
-                elif isinstance(dict):
+                elif isinstance(d, dict):
                     img = d["image"].to(device)
                     img_paths = d["path"]
         
@@ -120,9 +120,9 @@ def test_one_epoch(epoch, test_dataloader, model, criterion, save_dir, logger_va
     
     with torch.no_grad():
         for i, d in enumerate(test_dataloader):
-            if isinstance(torch.Tensor):
+            if isinstance(d, torch.Tensor):
                 img = d.to(device)
-            elif isinstance(dict):
+            elif isinstance(d, dict):
                 img = d["image"].to(device)
                 img_paths = d["path"]
             B, C, H, W = img.shape
@@ -352,9 +352,9 @@ def test_model(test_dataloader, net, logger_test, save_dir, epoch):
 
     with torch.no_grad():
         for i, d in enumerate(test_dataloader):
-            if isinstance(torch.Tensor):
+            if isinstance(d, torch.Tensor):
                 img = d.to(device)
-            elif isinstance(dict):
+            elif isinstance(d, dict):
                 img = d["image"].to(device)
                 img_paths = d["path"]
             bpp = 1e6
@@ -424,7 +424,6 @@ def test_model(test_dataloader, net, logger_test, save_dir, epoch):
     )
 
 
-
 def test_model_vbr(test_dataloader, net, logger_test, save_dir, epoch, custom_scales=None):
     net.eval()
     device = next(net.parameters()).device
@@ -456,9 +455,9 @@ def test_model_vbr(test_dataloader, net, logger_test, save_dir, epoch, custom_sc
     with torch.no_grad():
         for i, d in enumerate(test_dataloader):
             
-            if isinstance(torch.Tensor):
+            if isinstance(d, torch.Tensor):
                 img = d.to(device)
-            elif isinstance(dict):
+            elif isinstance(d, dict):
                 img = d["image"].to(device)
                 img_paths = d["path"]
             

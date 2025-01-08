@@ -27,10 +27,13 @@
 # OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF
 # ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
+import math
 from pathlib import Path
 
 from PIL import Image
+import torch
 from torch.utils.data import Dataset
+from torchvision import transforms
 
 from compressai.registry import register_dataset
 
@@ -82,3 +85,32 @@ class ImageFolder2(Dataset):
 
     def __len__(self):
         return len(self.samples)
+    
+from torchvision.transforms import functional as F
+
+class RandomResize:
+    def __init__(self, c=3.2, interpolation=Image.BILINEAR):
+        """
+        Random area scaling transformation with scale factors in [0.2, 5].
+        
+        Parameters:
+            c (float): Controls the range of scaling, s ∈ [exp(-c), exp(c)].
+            interpolation: Interpolation method, default is Image.BILINEAR.
+        """
+        self.c = c
+        self.interpolation = interpolation
+
+    def __call__(self, img):
+        # Sample ln(s) uniformly from [-c, c]
+        ln_s = torch.empty(1).uniform_(-self.c, self.c).item()
+        # Compute scaling factor s
+        s = math.exp(ln_s)
+        # Calculate scale factor for width and height
+        scale_factor = math.sqrt(s)
+        # Get original image dimensions
+        width, height = img.size
+        # Compute new dimensions
+        new_width = max(1, int(width * scale_factor))
+        new_height = max(1, int(height * scale_factor))
+        # Resize the image
+        return F.resize(img, (new_height, new_width), interpolation=self.interpolation)

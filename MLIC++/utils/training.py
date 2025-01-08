@@ -54,9 +54,9 @@ def train_one_epoch(
     device = next(model.parameters()).device
     gauss_k = get_gaussian_kernel().to(device)
     for i, d in enumerate(train_dataloader):
-        if isinstance(torch.Tensor):
+        if isinstance(d, torch.Tensor):
             img = d.to(device)
-        elif isinstance(dict):
+        elif isinstance(d, dict):
             img = d["image"].to(device)
             img_paths = d["path"]
         
@@ -120,6 +120,93 @@ def train_one_epoch(
 
     return current_step
 
+
+def train_one_epoch_dual(
+    model, criterion, train_dataloader, optimizer, aux_optimizer, epoch, clip_max_norm, logger_train, tb_logger, current_step, rank=1, amp=True
+):
+    
+    scaler = GradScaler(enabled=amp)
+    model.train()
+    device = next(model.parameters()).device
+    gauss_k = get_gaussian_kernel().to(device)
+    
+    for i, d in enumerate(train_dataloader):
+        if isinstance(d, torch.Tensor):
+            img = d.to(device)
+        elif isinstance(d, dict):
+            img = d["image"].to(device)
+            img_paths = d["path"]
+        
+        optimizer.zero_grad()
+        aux_optimizer.zero_grad()
+        
+        with autocast(enabled=amp):
+            # SR
+            # blur_d = gauss_k(d)
+            # with torch.no_grad():
+            first_out_net = model(img)
+            first_out_criterion = criterion(first_out_net, img)
+            first_aux_loss = model.aux_loss() if isinstance(model, CompressionModel) else model.module.aux_loss()
+            
+            compressed_img = first_out_criterion["x_hat"].detach()
+            out_net = model(compressed_img)
+            old_lmbda = criterion.lmbda
+            new_lmbda = criterion.lmbda * 0.5
+            criterion.set_lmbda(new_lmbda)
+            out_criterion = criterion(out_net, img)
+            criterion.set_lmbda(old_lmbda)
+            
+        scaler.scale(first_out_criterion["loss"] + out_criterion["loss"]).backward()
+
+        if clip_max_norm > 0:
+            torch.nn.utils.clip_grad_norm_(model.parameters(), clip_max_norm)
+        # optimizer.step()
+        scaler.step(optimizer)
+
+        aux_loss = model.aux_loss() if isinstance(model, CompressionModel) else model.module.aux_loss()
+        scaler.scale(aux_loss + first_aux_loss).backward()
+        # aux_optimizer.step()
+        scaler.step(aux_optimizer)
+        scaler.update()
+
+        current_step += 1
+        
+        if rank <= 0:
+            if current_step % 20 == 0:
+                tb_logger.add_scalar('{}'.format('[train]: loss'), out_criterion["loss"].item(), current_step)
+                tb_logger.add_scalar('{}'.format('[train]: bpp_loss'), out_criterion["bpp_loss"].item(), current_step)
+                tb_logger.add_scalar('{}'.format('[train]: lr'), optimizer.param_groups[0]['lr'], current_step)
+                tb_logger.add_scalar('{}'.format('[train]: aux_loss'), aux_loss.item(), current_step)
+                if out_criterion["mse_loss"] is not None:
+                    tb_logger.add_scalar('{}'.format('[train]: mse_loss'), out_criterion["mse_loss"].item(), current_step)
+                if out_criterion["ms_ssim_loss"] is not None:
+                    tb_logger.add_scalar('{}'.format('[train]: ms_ssim_loss'), out_criterion["ms_ssim_loss"].item(), current_step)
+
+            if i % 20 == 0:
+                if out_criterion["ms_ssim_loss"] is None:
+                    logger_train.info(
+                        f"Train epoch {epoch}: ["
+                        f"{i*len(d):5d}/{len(train_dataloader.dataset)}"
+                        f" ({100. * i / len(train_dataloader):.0f}%)] "
+                        f'Loss: {out_criterion["loss"].item():.4f} | '
+                        f'MSE loss: {out_criterion["mse_loss"].item():.4f} | '
+                        f'Bpp loss: {out_criterion["bpp_loss"].item():.2f} | '
+                        f"Aux loss: {aux_loss.item():.2f}"
+                    )
+                else:
+                    logger_train.info(
+                        f"Train epoch {epoch}: ["
+                        f"{i*len(d):5d}/{len(train_dataloader.dataset)}"
+                        f" ({100. * i / len(train_dataloader):.0f}%)] "
+                        f'Loss: {out_criterion["loss"].item():.4f} | '
+                        f'MS-SSIM loss: {out_criterion["ms_ssim_loss"].item():.4f} | '
+                        f'Bpp loss: {out_criterion["bpp_loss"].item():.2f} | '
+                        f"Aux loss: {aux_loss.item():.2f}"
+                    )
+
+    return current_step
+
+
 import torch.optim as optim
 from torch.autograd import grad
 
@@ -147,9 +234,9 @@ def train_one_epoch_mmo(
     device = next(model.parameters()).device
     gauss_k = get_gaussian_kernel().to(device)
     for i, d in enumerate(train_dataloader):
-        if isinstance(torch.Tensor):
+        if isinstance(d, torch.Tensor):
             img = d.to(device)
-        elif isinstance(dict):
+        elif isinstance(d, dict):
             img = d["image"].to(device)
             img_paths = d["path"]
         

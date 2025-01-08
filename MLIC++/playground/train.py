@@ -24,7 +24,8 @@ from config.config import model_config
 from models import *
 import random
 from ddp import *
-from playground.dataset import ImageFolder2
+from playground.dataset import ImageFolder2, RandomResize
+
 
 def parse_gpu_ids(gpu_ids_str):
     # 替换中文逗号为英文逗号
@@ -78,7 +79,7 @@ def main():
         os.makedirs(os.path.join('./experiments', args.experiment, 'checkpoints'))
 
     train_transforms = transforms.Compose(
-        [transforms.RandomCrop(args.patch_size), transforms.ToTensor()]
+        [transforms.AutoAugment(), RandomResize(), transforms.RandomCrop(args.patch_size, pad_if_needed=True), transforms.ToTensor()]
     )
     test_transforms = transforms.Compose(
         [transforms.ToTensor()]
