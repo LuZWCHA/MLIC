@@ -404,7 +404,7 @@ def test_model(test_dataloader, net, logger_test, save_dir, epoch):
             avg_dec_time.update(dec_time)
             logger_test.info(
                 f"Image[{i}] | "
-                f"Bpp loss: {bpp:.2f} | "
+                f"Bpp: {bpp:.2f} | "
                 f"PSNR: {p:.4f} | "
                 f"LPIPS: {lp:.4f} | "
                 f"DISTS: {dists:.4f} | "

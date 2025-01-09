@@ -80,8 +80,8 @@ class ImageFolder2(Dataset):
         """
         img = Image.open(self.samples[index]).convert("RGB")
         if self.transform:
-            return self.transform(img)
-        return {"image": img, "path": self.samples[index]}
+            img = self.transform(img)
+        return {"image": img, "path": str(self.samples[index])}
 
     def __len__(self):
         return len(self.samples)

@@ -214,6 +214,8 @@ def main():
         )
         
         if local_rank <= 0:
+            cur_lr = optimizer.param_groups[0]['lr']
+            logger_train.info(f"Learning Rate: {cur_lr}")
             save_dir = os.path.join('./experiments', args.experiment, 'val_images', '%03d' % (epoch + 1))
             # Test on gpuid=0
             loss = test_one_epoch(epoch, test_dataloader, net.module if isinstance(net, DDP) else net, criterion, save_dir, logger_val, tb_logger)

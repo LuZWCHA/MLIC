@@ -6,7 +6,7 @@ from pytorch_msssim import ms_ssim
 from lpips import lpips
 from DISTS_pytorch import DISTS
 
-lp_fn = lpips.LPIPS(net="vgg")
+lp_fn = lpips.LPIPS(net="vgg").eval()
 dists_fn = DISTS()
 
 def compute_metrics(
@@ -31,6 +31,7 @@ def compute_metrics(
     mse = torch.mean((a - b) ** 2).item()
     p = 20 * np.log10(max_val) - 10 * np.log10(mse)
     m = ms_ssim(a, b, data_range=max_val).item()
-    lpips_m = lp_fn.to(device).forward((a.to(device) / max_val * 2) -1, b.to(device) / max_val * 2 - 1).item()
-    dists = dists_fn.to(device).forward(a.to(device) / max_val, b.to(device) / max_val).item()
+    with torch.no_grad():
+        lpips_m = lp_fn.to(device).forward(a.to(device) / max_val, b.to(device) / max_val, normalize=True).item()
+        dists = dists_fn.to(device).forward(a.to(device) / max_val, b.to(device) / max_val).item()
     return p, m, lpips_m, dists

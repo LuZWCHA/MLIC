@@ -20,7 +20,13 @@ def train_options():
         "--resume",
         action="store_true",
         help="Resume model and all other trainer"
-    ) 
+    )
+    parser.add_argument(
+        "--log_freq", 
+        type=int, 
+        default=20, 
+        help="Logging frequency (in batches)"
+    )
     parser.add_argument(
         "-m",
         "--model-name",
