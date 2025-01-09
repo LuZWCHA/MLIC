@@ -65,7 +65,7 @@ class Trainer(BaseTrainer):
             transforms.RandomCrop(self.args.patch_size, pad_if_needed=True),
             transforms.ToTensor()
         ])
-        self.train_dataset = ImageFolder2(self.args.dataset, split="train/openimagev7/testset", transform=train_transforms)
+        self.train_dataset = ImageFolder2(self.args.dataset, split="train", transform=train_transforms)
 
         self.train_sampler = DistributedSampler(self.train_dataset) if self.ddp_enable else None
         train_loader = DataLoader(
@@ -292,3 +292,43 @@ if __name__ == '__main__':
     args = train_options()
     trainer = Trainer(args)
     trainer.fit()
+    
+    
+class VBRTrainer(Trainer):
+    
+    def train_step(self, batch, scaler):
+        """训练步骤"""
+        images = batch["image"].to(self.device)
+        self.optimizer.zero_grad()
+        self.aux_optimizer.zero_grad()
+
+        with torch.cuda.amp.autocast(enabled=self.args.amp):
+            out_net = self.model(images)
+            out_criterion = self.criterion(out_net, images)
+
+        scaler.scale(out_criterion["loss"]).backward()
+        if self.args.clip_max_norm > 0:
+            scaler.unscale_(self.optimizer)
+            torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.args.clip_max_norm)
+        scaler.step(self.optimizer)
+
+        aux_loss = self.model.module.aux_loss() if self.ddp_enable else self.model.aux_loss()
+        scaler.scale(aux_loss).backward()
+        scaler.step(self.aux_optimizer)
+        scaler.update()
+
+        losses = {
+            "loss": out_criterion["loss"].item(),
+            "bpp_loss": out_criterion["bpp_loss"].item(),
+            "aux_loss": aux_loss.item(),
+        }
+        
+        if "mse_loss" in out_criterion and out_criterion["mse_loss"] is not None:
+            losses["mse_loss"] = out_criterion["mse_loss"].item()
+        if "ms_ssim_loss" in out_criterion and out_criterion["ms_ssim_loss"] is not None:
+            losses["ms_ssim_loss"] = out_criterion["ms_ssim_loss"].item()
+        
+        return losses
+    
+    def val_step(self, batch):
+        return super().val_step(batch)

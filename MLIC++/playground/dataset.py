@@ -27,6 +27,7 @@
 # OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF
 # ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
+import glob
 import math
 from pathlib import Path
 
@@ -66,7 +67,7 @@ class ImageFolder2(Dataset):
         if not splitdir.is_dir():
             raise RuntimeError(f'Missing directory "{splitdir}"')
 
-        self.samples = sorted(f for f in splitdir.iterdir() if f.is_file())
+        self.samples = sorted(glob.glob(str(splitdir/"**/*.jpg"), recursive=True) + glob.glob(str(splitdir/"**/*.png"), recursive=True))
 
         self.transform = transform
 
