@@ -92,11 +92,14 @@ def main():
     train_sampler = test_sampler =  None
     local_rank = -1
     if ddp_enable:
-        local_rank = int(os.environ["LOCAL_RANK"]) ## DDP
-        logger_train.info(os.environ)
-        torch.cuda.set_device(local_rank)
-        dist.init_process_group(backend='nccl')
-        device = torch.device("cuda", local_rank)
+        if "LOCAL_RANK" not in os.environ:
+            ddp_enable = False
+        else:
+            local_rank = int(os.environ["LOCAL_RANK"]) ## DDP
+            logger_train.info(os.environ)
+            torch.cuda.set_device(local_rank)
+            dist.init_process_group(backend='nccl')
+            device = torch.device("cuda", local_rank)
         
         from torch.utils.data.distributed import DistributedSampler ## DDP
         train_sampler = DistributedSampler(train_dataset)

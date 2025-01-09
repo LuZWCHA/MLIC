@@ -51,6 +51,7 @@ class BaseTrainer:
         self.checkpoint_dir = os.path.join(self.experiment_dir, 'checkpoints')
         self.val_images_dir = os.path.join(self.experiment_dir, 'val_images')
         self.tb_log_dir = os.path.join('./tb_logger', self.args.experiment)
+        self.eval_first = True
 
         # 初始化日志记录
         self._setup_logging()
@@ -68,9 +69,18 @@ class BaseTrainer:
         # 初始化损失函数
         self._setup_criterion()
 
+        # 初始化训练状态
+        self.__rest()
+
         # 加载检查点（如果提供了 checkpoint 路径）
         if self.args.checkpoint is not None:
             self._load_checkpoint()
+
+    def __rest(self):
+        # 初始化训练状态
+        self.best_loss = float('inf')
+        self.current_step = 0
+        self.start_epoch = 0
 
     def __setup_data(self):
         """初始化训练和测试数据集"""
@@ -133,26 +143,42 @@ class BaseTrainer:
             return dist.get_rank() == 0
         return True  # 单机训练时默认是主进程
 
+    def train_stage(self, epoch):
+        # 训练一个 epoch
+        self.train_epoch(epoch)
+
+    def eval_stage(self, epoch):
+        # 验证
+        if self.is_main_process():
+            val_metrics = self.validate_epoch(epoch)
+        
+        # 保存最佳模型
+        if self.is_main_process() and val_metrics["loss"] < self.best_loss:
+            self.best_loss = val_metrics["loss"]
+            self._save_checkpoint(epoch, val_metrics["loss"])
+
+        dist.barrier()
+
     def fit(self):
         """训练循环"""
         for epoch in range(self.args.epochs):
             if self.ddp_enable:
                 self.train_loader.sampler.set_epoch(epoch)
 
-            # 训练一个 epoch
-            self.train_epoch(epoch)
-
-            # 验证
-            val_metrics = self.validate_epoch(epoch)
-
-            # 保存最佳模型
-            if self.is_main_process() and val_metrics["loss"] < self.best_loss:
-                self.best_loss = val_metrics["loss"]
-                self._save_checkpoint(epoch, val_metrics["loss"])
+            
+            if self.eval_first:
+                self.eval_stage(epoch)
+                self.train_stage(epoch)
+            else:
+                self.train_stage(epoch)
+                self.eval_stage(epoch)
+            
 
             # 更新学习率
             if hasattr(self, "lr_scheduler"):
                 self.lr_scheduler.step()
+            
+            
 
         # 清理分布式训练
         if self.ddp_enable:
@@ -184,7 +210,7 @@ class BaseTrainer:
         # 初始化验证指标
         self._init_val_metrics()
 
-        with torch.no_grad():
+        with torch.inference_mode():
             for batch_idx, batch in enumerate(self.test_loader):
                 # 执行验证步骤
                 step_metrics = self.val_step(batch)

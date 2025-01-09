@@ -19,6 +19,7 @@ class Trainer(BaseTrainer):
 
     def __init__(self, args=None, **kwargs):
         super().__init__(args, **kwargs)
+        self.eval_first = False
         if self.is_main_process():
             self.logger_train.info(get_system_info_str())
 
@@ -251,7 +252,7 @@ class Trainer(BaseTrainer):
         pad_w = 0 if W % 64 == 0 else 64 * (W // 64 + 1) - W
         images_pad = F.pad(images, (0, pad_w, 0, pad_h), mode='constant', value=0)
 
-        out_net = self.model(images_pad)
+        out_net = self.model.module(images_pad) if self.ddp_enable else self.model(images_pad)
         out_net['x_hat'] = out_net['x_hat'][:, :, :H, :W]
         out_criterion = self.criterion(out_net, images)
 
