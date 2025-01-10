@@ -7,6 +7,7 @@ from torch.utils.tensorboard import SummaryWriter
 
 from utils.logger import setup_logger
 from utils.utils import save_checkpoint
+from tqdm import tqdm
 
 
 class BaseTrainer:
@@ -165,7 +166,6 @@ class BaseTrainer:
             if self.ddp_enable:
                 self.train_loader.sampler.set_epoch(epoch)
 
-            
             if self.eval_first:
                 self.eval_stage(epoch)
                 self.train_stage(epoch)
@@ -173,12 +173,9 @@ class BaseTrainer:
                 self.train_stage(epoch)
                 self.eval_stage(epoch)
             
-
             # 更新学习率
             if hasattr(self, "lr_scheduler"):
                 self.lr_scheduler.step()
-            
-            
 
         # 清理分布式训练
         if self.ddp_enable:
@@ -192,7 +189,9 @@ class BaseTrainer:
         # 初始化训练指标
         self._init_train_metrics()
 
-        for batch_idx, batch in enumerate(self.train_loader):            
+        # 使用 tqdm 显示进度条
+        progress_bar = tqdm(self.train_loader, desc=f"Epoch {epoch + 1}/{self.args.epochs}", leave=False)
+        for batch_idx, batch in enumerate(progress_bar):
             # 执行训练步骤
             step_metrics = self.train_step(batch, scaler)
 
@@ -202,6 +201,12 @@ class BaseTrainer:
             # 记录日志
             if self.is_main_process() and batch_idx % self.args.log_freq == 0:
                 self._log_train(epoch, batch_idx)
+
+            # 更新进度条描述
+            progress_bar.set_postfix(loss=step_metrics.get("loss", "N/A"))
+
+        # 关闭进度条
+        progress_bar.close()
 
     def validate_epoch(self, epoch):
         """验证一个 epoch"""

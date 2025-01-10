@@ -4,8 +4,8 @@ import torch
 import torch.distributed as dist
 from torch.utils.data import DataLoader, DistributedSampler
 from torchvision import transforms
-from utils.utils import AverageMeter, get_system_info_str
-from utils.optimizers import configure_optimizers
+from utils.utils import AverageMeter, get_system_info_str, pretty_print_dict
+from utils.optimizers import configure_optimizers, configure_optimizers_mmo
 from loss.rd_loss import RateDistortionLoss
 from models import get_model
 from playground.dataset import ImageFolder2, RandomResize
@@ -119,6 +119,17 @@ class Trainer(BaseTrainer):
         self.train_bpp_loss = AverageMeter()
         self.train_sm_loss = AverageMeter()
         self.train_aux_loss = AverageMeter()
+        
+    def _init_val_metrics(self):
+        """初始化验证指标"""
+        self.val_loss = AverageMeter()
+        self.val_bpp_loss = AverageMeter()
+        self.val_mse_loss = AverageMeter()
+        self.val_ms_ssim = AverageMeter()
+        self.val_aux_loss = AverageMeter()
+        self.val_psnr = AverageMeter()
+        self.val_lpips = AverageMeter()
+        self.val_dists = AverageMeter()
 
     def _update_train_metrics(self, step_metrics):
         """更新训练指标"""
@@ -129,6 +140,17 @@ class Trainer(BaseTrainer):
             self.train_sm_loss.update(step_metrics["mse_loss"])
         self.train_bpp_loss.update(step_metrics["bpp_loss"])
         self.train_aux_loss.update(step_metrics["aux_loss"])
+        
+    def _update_val_metrics(self, step_metrics):
+        """更新验证指标"""
+        self.val_loss.update(step_metrics["loss"])
+        self.val_bpp_loss.update(step_metrics["bpp_loss"])
+        self.val_psnr.update(step_metrics["psnr"])
+        self.val_ms_ssim.update(step_metrics["ms_ssim"])
+        self.val_mse_loss.update(step_metrics["smilar_loss"])
+        self.val_aux_loss.update(step_metrics["aux_loss"])
+        self.val_dists.update(step_metrics["dists"])
+        self.val_lpips.update(step_metrics["lpips"])
 
     def _log_train(self, epoch, batch_idx):
         """记录训练日志"""
@@ -152,28 +174,6 @@ class Trainer(BaseTrainer):
         self.tb_logger.add_scalar(tb_train_sm_loss_tag, self.train_sm_loss.avg, step)
         self.tb_logger.add_scalar(tb_train_bpp_loss_tag, self.train_bpp_loss.avg, step)
         self.tb_logger.add_scalar(tb_train_aux_loss_tag, self.train_aux_loss.avg, step)
-
-    def _init_val_metrics(self):
-        """初始化验证指标"""
-        self.val_loss = AverageMeter()
-        self.val_bpp_loss = AverageMeter()
-        self.val_mse_loss = AverageMeter()
-        self.val_ms_ssim = AverageMeter()
-        self.val_aux_loss = AverageMeter()
-        self.val_psnr = AverageMeter()
-        self.val_lpips = AverageMeter()
-        self.val_dists = AverageMeter()
-
-    def _update_val_metrics(self, step_metrics):
-        """更新验证指标"""
-        self.val_loss.update(step_metrics["loss"])
-        self.val_bpp_loss.update(step_metrics["bpp_loss"])
-        self.val_psnr.update(step_metrics["psnr"])
-        self.val_ms_ssim.update(step_metrics["ms_ssim"])
-        self.val_mse_loss.update(step_metrics["smilar_loss"])
-        self.val_aux_loss.update(step_metrics["aux_loss"])
-        self.val_dists.update(step_metrics["dists"])
-        self.val_lpips.update(step_metrics["lpips"])
 
     def _log_val(self, epoch):
         """记录验证日志"""
@@ -199,7 +199,7 @@ class Trainer(BaseTrainer):
         self.tb_logger.add_scalar(tb_val_lpips_tag, self.val_lpips.avg, epoch + 1)
 
     def _get_val_metrics(self):
-        """获取验证指标"""
+        """获取验证指标, 计算best loss来保存checkpoint"""
         return {
             "loss": self.val_loss.avg,
             "bpp_loss": self.val_bpp_loss.avg,
@@ -220,13 +220,15 @@ class Trainer(BaseTrainer):
             out_criterion = self.criterion(out_net, images)
 
         scaler.scale(out_criterion["loss"]).backward()
-        if self.args.clip_max_norm > 0:
-            scaler.unscale_(self.optimizer)
-            torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.args.clip_max_norm)
         scaler.step(self.optimizer)
 
         aux_loss = self.model.module.aux_loss() if self.ddp_enable else self.model.aux_loss()
         scaler.scale(aux_loss).backward()
+        
+        if self.args.clip_max_norm > 0:
+            scaler.unscale_(self.aux_optimizer)
+            torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.args.clip_max_norm)
+        
         scaler.step(self.aux_optimizer)
         scaler.update()
 
@@ -264,6 +266,11 @@ class Trainer(BaseTrainer):
         img = torch2img(images)
         psnr, ms_ssim, lpips_m, dists = compute_metrics(rec, img)
         
+        if not os.path.exists(self.val_images_dir):
+            os.makedirs(self.val_images_dir)
+        rec.save(os.path.join(self.val_images_dir, '%03d_rec.png' % batch))
+        img.save(os.path.join(self.val_images_dir, '%03d_gt.png' % batch))
+
         if out_criterion["mse_loss"] is not None:
             smiliar = out_criterion["mse_loss"]
             
@@ -283,7 +290,7 @@ class Trainer(BaseTrainer):
         }
         
         # if self.is_main_process():
-        self.logger_val.info(metrics)
+        self.logger_val.info(pretty_print_dict(metrics))
         
         return metrics
         
@@ -293,27 +300,92 @@ if __name__ == '__main__':
     trainer = Trainer(args)
     trainer.fit()
     
-    
+
+from models import *
 class VBRTrainer(Trainer):
     
-    def train_step(self, batch, scaler):
+    def _setup_optimizers(self):
+        self.optimizer, self.aux_optimizer, self.gain_optimizers = \
+        configure_optimizers_mmo(self.model, self.args)
+        
+    
+    def __min_norm_solver(self, gradients, max_iter=10):
+        """最小范数求解器"""
+        N = len(gradients)
+        alpha = torch.ones(N, device=gradients[0].device) / N
+        for _ in range(max_iter):
+            combined = torch.sum(alpha[:, None] * gradients, dim=0)
+            dot_products = torch.sum(combined * gradients, dim=1)
+            min_idx = torch.argmin(dot_products)
+            direction = torch.zeros_like(alpha)
+            direction[min_idx] = 1.0 - alpha[min_idx]
+            alpha += 0.5 * direction  # Update rule, can be adjusted
+            alpha = torch.clamp(alpha, min=0.0)
+            alpha /= alpha.sum()
+        return alpha
+    
+    def train_step(self, batch, scaler:torch.cuda.amp.GradScaler):
         """训练步骤"""
+        self.model: MLICPlusPlusSDVbr
         images = batch["image"].to(self.device)
         self.optimizer.zero_grad()
         self.aux_optimizer.zero_grad()
+        gradients_theta = []
+        gradients_shared = []
+        N = self.model.levels
+        shared_parameters, _ = self.model.mmo_parameters()
 
         with torch.cuda.amp.autocast(enabled=self.args.amp):
-            out_net = self.model(images)
-            out_criterion = self.criterion(out_net, images)
+            for i in range(N):
+                self.gain_optimizers[i].zero_grad()
+                out_net = self.model.forward(images, stage=2, s=i)
+                out_criterion = self.criterion(out_net, images)
+                loss = out_criterion["loss"]
+                # Collect gradients for θ
+                gradients_theta = [sp.grad.detach().clone() for sp in shared_parameters]
+            
+                scaler.scale(loss).backward(retain_graph=True)
+                scaler.step(self.gain_optimizers[i])
+                gradients_shared.append(gradients_theta)
 
-        scaler.scale(out_criterion["loss"]).backward()
-        if self.args.clip_max_norm > 0:
-            scaler.unscale_(self.optimizer)
-            torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.args.clip_max_norm)
+        # Flatten gradients for easier handling
+        flattened_gradients = [torch.cat([g.flatten() for g in grad_list]) for grad_list in gradients_shared]
+        
+        # Use MinNormSolver to find optimal alpha coefficients
+        alpha = self.__min_norm_solver(flattened_gradients)
+
+        # Combine gradients
+        combined_gradient = sum(alpha[i] * flattened_gradients[i] for i in range(model.levels))
+        
+        # Unflatten combined gradient and set to shared parameters
+        idx = 0
+        for param in shared_parameters:
+            num_params = param.numel()
+            param.grad = combined_gradient[idx:idx+num_params].view(param.shape)
+            idx += num_params
+
+        if self.ddp_enable:
+            world_size = dist.get_world_size()
+        else:
+            world_size = 1
+        
+        # Synchronize combined gradients across all processes
+        for param in shared_parameters:
+            if self.ddp_enable:
+                dist.all_reduce(param.grad, op=dist.ReduceOp.SUM)
+            param.grad /= world_size  # Average gradients
+    
         scaler.step(self.optimizer)
 
         aux_loss = self.model.module.aux_loss() if self.ddp_enable else self.model.aux_loss()
         scaler.scale(aux_loss).backward()
+        
+        if self.args.clip_max_norm > 0:
+            # scaler.unscale_(self.optimizer)
+            scaler.unscale_(self.aux_optimizer)
+            torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.args.clip_max_norm)
+            # torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.args.clip_max_norm)
+        
         scaler.step(self.aux_optimizer)
         scaler.update()
 
@@ -330,5 +402,105 @@ class VBRTrainer(Trainer):
         
         return losses
     
-    def val_step(self, batch):
-        return super().val_step(batch)
+    def val_step(self, batch, level):
+        """验证步骤"""
+        images = batch["image"].to(self.device)
+        paths = batch["path"].to(self.device)
+        B, C, H, W = images.shape
+
+        pad_h = 0 if H % 64 == 0 else 64 * (H // 64 + 1) - H
+        pad_w = 0 if W % 64 == 0 else 64 * (W // 64 + 1) - W
+        images_pad = F.pad(images, (0, pad_w, 0, pad_h), mode='constant', value=0)        
+        
+        out_net = self.model.module(images_pad, s=level) if self.ddp_enable else self.model(images_pad)
+        out_net['x_hat'] = out_net['x_hat'][:, :, :H, :W]
+        out_criterion = self.criterion(out_net, images)
+
+        aux_loss = self.model.module.aux_loss() if self.ddp_enable else self.model.aux_loss()
+        bpp_loss = out_criterion["bpp_loss"]
+        loss = out_criterion["loss"]
+
+        rec = torch2img(out_net['x_hat'])
+        img = torch2img(images)
+        psnr, ms_ssim, lpips_m, dists = compute_metrics(rec, img)
+        
+        if not os.path.exists(self.val_images_dir):
+            os.makedirs(self.val_images_dir)
+        rec.save(os.path.join(self.val_images_dir, '%03d_rec_lv%03d.png' % batch % level))
+        img.save(os.path.join(self.val_images_dir, '%03d_gt_lv%03d.png' % batch % level))
+
+        if out_criterion["mse_loss"] is not None:
+            smiliar = out_criterion["mse_loss"]
+            
+        if out_criterion["ms_ssim_loss"] is not None:
+            smiliar = out_criterion["ms_ssim_loss"]
+
+        metrics = {
+            "path": batch["path"][0],
+            "level": i,
+            "loss": loss.item(),
+            "aux_loss": aux_loss.item(),
+            "bpp_loss": bpp_loss.item(),
+            "smilar_loss": smiliar.item(),
+            "psnr": psnr,
+            "ms_ssim": ms_ssim,
+            "lpips": lpips_m,
+            "dists": dists,
+        }
+
+        # losses_level.append(metrics)
+        # if self.is_main_process():
+        self.logger_val.info(pretty_print_dict(metrics))
+            
+        return metrics
+    
+    def _log_train(self, epoch, batch_idx):
+        return super()._log_train(epoch, batch_idx)
+    
+    
+    def validate_epoch(self, epoch):
+        """验证一个 epoch"""
+        self.model.eval()
+
+        for i in range(self.model.levels):
+        # 初始化验证指标
+            self._init_val_metrics()
+
+            with torch.inference_mode():
+                for batch_idx, batch in enumerate(self.test_loader):
+                    # 执行验证步骤
+                    step_metrics_levels = self.val_step(batch, level=i)
+
+                    # 更新验证指标
+                    self._update_val_metrics(step_metrics_levels)
+
+            # 记录日志
+            if self.is_main_process():
+                self._log_val(epoch, i)
+
+        # 返回验证指标
+        # Use the last one
+        return self._get_val_metrics()
+    
+    def _log_val(self, epoch, level):
+        """记录验证日志"""
+        log_message = (
+            f"Test epoch {epoch} at lv{level}: Loss: {self.val_loss.avg:.4f} | Bpp: {self.val_bpp_loss.avg:.4f} | "
+            f"PSNR: {self.val_psnr.avg:.4f} | MS-SSIM: {self.val_ms_ssim.avg:.4f} | DIST: {self.val_dists.avg:.4f} | "
+            f"LPIPS: {self.val_lpips.avg:.4f}"
+        )
+        self.logger_val.info(log_message)
+        # 提取 TensorBoard 日志标签
+        
+        tb_val_loss_tag = f'Val/Loss_lv{level}'
+        tb_val_bpp_tag = f'Val/Bpp_lv{level}'
+        tb_val_psnr_tag = f'Val/PSNR_lv{level}'
+        tb_val_ms_ssim_tag = f'Val/MS-SSIM_lv{level}'
+        tb_val_dist_tag = f'Val/DIST_lv{level}'
+        tb_val_lpips_tag = f'Val/LPIPS_lv{level}'
+        self.tb_logger.add_scalar(tb_val_loss_tag, self.val_loss.avg, epoch + 1)
+        self.tb_logger.add_scalar(tb_val_bpp_tag, self.val_bpp_loss.avg, epoch + 1)
+        self.tb_logger.add_scalar(tb_val_psnr_tag, self.val_psnr.avg, epoch + 1)
+        self.tb_logger.add_scalar(tb_val_ms_ssim_tag, self.val_ms_ssim.avg, epoch + 1)
+        self.tb_logger.add_scalar(tb_val_dist_tag, self.val_dists.avg, epoch + 1)
+        self.tb_logger.add_scalar(tb_val_lpips_tag, self.val_lpips.avg, epoch + 1)

@@ -207,5 +207,11 @@ def get_system_info_str():
 
     return "\n" + total_info_str
 
+import pandas as pd
+def pretty_print_dict(data):
+    df = pd.DataFrame(data)
+    formatted_str = df.to_string(index=False)
+    return formatted_str
+
 if __name__ == "__main__":
     print(get_system_info_str())

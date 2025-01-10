@@ -101,8 +101,8 @@ def main():
             dist.init_process_group(backend='nccl')
             device = torch.device("cuda", local_rank)
         
-        from torch.utils.data.distributed import DistributedSampler ## DDP
-        train_sampler = DistributedSampler(train_dataset)
+            from torch.utils.data.distributed import DistributedSampler ## DDP
+            train_sampler = DistributedSampler(train_dataset)
         
     # logger_train.info(f"Local Rank: {local_rank}")
     if local_rank <= 0:
@@ -186,9 +186,8 @@ def main():
     # best_loss = 1e10
     # current_step = 0
     
-        
     optimizer.param_groups[0]['lr'] = args.learning_rate
-    local_rank = dist.get_rank()
+    # local_rank = dist.get_rank()
     
     if local_rank <= 0:
         logger_train.info(args)

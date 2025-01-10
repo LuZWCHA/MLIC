@@ -256,7 +256,7 @@ def train_one_epoch_mmo(
         # 计算每个任务的损失和梯度
         for i in range(N):
             optimizer_phi[i].zero_grad()
-            out_net = model(img, i)
+            out_net = model(img, s=i)
             out_criterion = criterion(out_net, img)
             
             loss = out_criterion["loss"]
