@@ -1,10 +1,11 @@
 import math
 import os
+from pathlib import Path
 import torch
 import torch.distributed as dist
 from torch.utils.data import DataLoader, DistributedSampler
 from torchvision import transforms
-from utils.utils import AverageMeter, get_system_info_str, pretty_print_dict
+from utils.utils import AverageMeter, disable_logging_prefix, get_system_info_str, pretty_print_dict
 from utils.optimizers import configure_optimizers, configure_optimizers_mmo
 from loss.rd_loss import RateDistortionLoss
 from models import get_model
@@ -12,6 +13,10 @@ from playground.dataset import ImageFolder2, RandomResize
 from utils.metrics import compute_metrics
 from utils.utils import torch2img
 import torch.nn.functional as F
+from PIL import Image
+
+# 提高PIL的大图像像素限制
+Image.MAX_IMAGE_PIXELS = 200_000_000  # 设置为 2 亿像素
 
 from base_trainer import BaseTrainer
 
@@ -19,7 +24,7 @@ class Trainer(BaseTrainer):
 
     def __init__(self, args=None, **kwargs):
         super().__init__(args, **kwargs)
-        self.eval_first = False
+        self.eval_first = True
         if self.is_main_process():
             self.logger_train.info(get_system_info_str())
 
@@ -147,7 +152,7 @@ class Trainer(BaseTrainer):
         self.val_bpp_loss.update(step_metrics["bpp_loss"])
         self.val_psnr.update(step_metrics["psnr"])
         self.val_ms_ssim.update(step_metrics["ms_ssim"])
-        self.val_mse_loss.update(step_metrics["smilar_loss"])
+        self.val_mse_loss.update(step_metrics["similar_loss"])
         self.val_aux_loss.update(step_metrics["aux_loss"])
         self.val_dists.update(step_metrics["dists"])
         self.val_lpips.update(step_metrics["lpips"])
@@ -248,6 +253,7 @@ class Trainer(BaseTrainer):
     def val_step(self, batch):
         """验证步骤"""
         images = batch["image"].to(self.device)
+        paths = batch["path"]
         B, C, H, W = images.shape
 
         pad_h = 0 if H % 64 == 0 else 64 * (H // 64 + 1) - H
@@ -266,10 +272,11 @@ class Trainer(BaseTrainer):
         img = torch2img(images)
         psnr, ms_ssim, lpips_m, dists = compute_metrics(rec, img)
         
+        stem = Path(paths[0]).stem
         if not os.path.exists(self.val_images_dir):
             os.makedirs(self.val_images_dir)
-        rec.save(os.path.join(self.val_images_dir, '%03d_rec.png' % batch))
-        img.save(os.path.join(self.val_images_dir, '%03d_gt.png' % batch))
+        rec.save(os.path.join(self.val_images_dir, '%s_rec.png' % stem))
+        img.save(os.path.join(self.val_images_dir, '%s_gt.png' % stem))
 
         if out_criterion["mse_loss"] is not None:
             smiliar = out_criterion["mse_loss"]
@@ -278,11 +285,11 @@ class Trainer(BaseTrainer):
             smiliar = out_criterion["ms_ssim_loss"]
 
         metrics = {
-            "path": batch["path"][0],
+            "path": Path(batch["path"][0]).name,
             "loss": loss.item(),
             "aux_loss": aux_loss.item(),
             "bpp_loss": bpp_loss.item(),
-            "smilar_loss": smiliar.item(),
+            "similar_loss": smiliar.item(),
             "psnr": psnr,
             "ms_ssim": ms_ssim,
             "lpips": lpips_m,
@@ -290,7 +297,8 @@ class Trainer(BaseTrainer):
         }
         
         # if self.is_main_process():
-        self.logger_val.info(pretty_print_dict(metrics))
+        with disable_logging_prefix(self.logger_val):
+            self.logger_val.info(pretty_print_dict([metrics]))
         
         return metrics
         
@@ -355,7 +363,7 @@ class VBRTrainer(Trainer):
         alpha = self.__min_norm_solver(flattened_gradients)
 
         # Combine gradients
-        combined_gradient = sum(alpha[i] * flattened_gradients[i] for i in range(model.levels))
+        combined_gradient = sum(alpha[i] * flattened_gradients[i] for i in range(self.model.levels))
         
         # Unflatten combined gradient and set to shared parameters
         idx = 0
@@ -405,7 +413,7 @@ class VBRTrainer(Trainer):
     def val_step(self, batch, level):
         """验证步骤"""
         images = batch["image"].to(self.device)
-        paths = batch["path"].to(self.device)
+        paths = batch["path"]
         B, C, H, W = images.shape
 
         pad_h = 0 if H % 64 == 0 else 64 * (H // 64 + 1) - H
@@ -424,10 +432,11 @@ class VBRTrainer(Trainer):
         img = torch2img(images)
         psnr, ms_ssim, lpips_m, dists = compute_metrics(rec, img)
         
+        stem = Path(paths[0]).stem
         if not os.path.exists(self.val_images_dir):
             os.makedirs(self.val_images_dir)
-        rec.save(os.path.join(self.val_images_dir, '%03d_rec_lv%03d.png' % batch % level))
-        img.save(os.path.join(self.val_images_dir, '%03d_gt_lv%03d.png' % batch % level))
+        rec.save(os.path.join(self.val_images_dir, '%s_rec_lv%03d.png' % stem % level))
+        img.save(os.path.join(self.val_images_dir, '%s_gt_lv%03d.png' % stem % level))
 
         if out_criterion["mse_loss"] is not None:
             smiliar = out_criterion["mse_loss"]
@@ -437,11 +446,11 @@ class VBRTrainer(Trainer):
 
         metrics = {
             "path": batch["path"][0],
-            "level": i,
+            "level": level,
             "loss": loss.item(),
             "aux_loss": aux_loss.item(),
             "bpp_loss": bpp_loss.item(),
-            "smilar_loss": smiliar.item(),
+            "similar_loss": smiliar.item(),
             "psnr": psnr,
             "ms_ssim": ms_ssim,
             "lpips": lpips_m,

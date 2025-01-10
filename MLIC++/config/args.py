@@ -129,6 +129,12 @@ def train_options():
         help="gradient clipping max norm (default: %(default)s",
     )
     parser.add_argument(
+        "--optimizer",
+        default="Adam",
+        type=str,
+        help="optimizer to use (default: %(default)s)",
+    )
+    parser.add_argument(
         "-c",
         "--checkpoint",
         default=None,

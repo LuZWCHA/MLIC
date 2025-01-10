@@ -8,6 +8,10 @@ from pathlib import Path
 from torchvision.transforms import ToPILImage
 import json
 
+import pandas as pd
+
+import logging
+from contextlib import contextmanager
 
 """ configuration json """
 class Config(dict):
@@ -207,7 +211,27 @@ def get_system_info_str():
 
     return "\n" + total_info_str
 
-import pandas as pd
+
+# 定义通用的上下文管理器
+@contextmanager
+def disable_logging_prefix(logger):
+    """
+    临时禁用指定 logger 的前缀。
+    
+    :param logger: 需要禁用前缀的 logging.Logger 对象。
+    """
+    # 保存所有 Handler 的原始 Formatter
+    original_formatters = [handler.formatter for handler in logger.handlers]
+    # 临时禁用前缀
+    for handler in logger.handlers:
+        handler.setFormatter(logging.Formatter("%(message)s"))
+    try:
+        yield
+    finally:
+        # 恢复所有 Handler 的原始 Formatter
+        for handler, formatter in zip(logger.handlers, original_formatters):
+            handler.setFormatter(formatter)
+
 def pretty_print_dict(data):
     df = pd.DataFrame(data)
     formatted_str = df.to_string(index=False)

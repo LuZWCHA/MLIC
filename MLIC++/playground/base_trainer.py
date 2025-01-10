@@ -211,7 +211,9 @@ class BaseTrainer:
     def validate_epoch(self, epoch):
         """验证一个 epoch"""
         self.model.eval()
-
+        # 记录日志
+        if self.is_main_process():
+            self.logger_val.info(f"Start validation epoch {epoch}")
         # 初始化验证指标
         self._init_val_metrics()
 
@@ -223,6 +225,8 @@ class BaseTrainer:
                 # 更新验证指标
                 self._update_val_metrics(step_metrics)
 
+        if self.is_main_process():
+            self.logger_val.info(f"End validation epoch {epoch}")
         # 记录日志
         if self.is_main_process():
             self._log_val(epoch)
