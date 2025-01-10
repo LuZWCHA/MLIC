@@ -51,6 +51,7 @@ class BaseTrainer:
         self.experiment_dir = os.path.join('./experiments', self.args.experiment)
         self.checkpoint_dir = os.path.join(self.experiment_dir, 'checkpoints')
         self.val_images_dir = os.path.join(self.experiment_dir, 'val_images')
+        self.codestreams_dir = os.path.join(self.experiment_dir, 'codestreams')
         self.tb_log_dir = os.path.join('./tb_logger', self.args.experiment)
         self.eval_first = True
 
@@ -193,7 +194,7 @@ class BaseTrainer:
         progress_bar = tqdm(self.train_loader, desc=f"Epoch {epoch + 1}/{self.args.epochs}", leave=False)
         for batch_idx, batch in enumerate(progress_bar):
             # 执行训练步骤
-            step_metrics = self.train_step(batch, scaler)
+            step_metrics = self.train_step(batch, scaler, epoch, batch_idx)
 
             # 更新训练指标
             self._update_train_metrics(step_metrics)
@@ -220,7 +221,7 @@ class BaseTrainer:
         with torch.inference_mode():
             for batch_idx, batch in enumerate(self.test_loader):
                 # 执行验证步骤
-                step_metrics = self.val_step(batch)
+                step_metrics = self.val_step(batch, epoch, batch_idx)
 
                 # 更新验证指标
                 self._update_val_metrics(step_metrics)
@@ -234,11 +235,11 @@ class BaseTrainer:
         # 返回验证指标
         return self._get_val_metrics()
 
-    def train_step(self, batch, scaler):
+    def train_step(self, batch, scaler, epoch, batch_idx):
         """训练步骤，由子类实现"""
         raise NotImplementedError("Subclasses should implement this method")
 
-    def val_step(self, batch):
+    def val_step(self, batch, epoch, batch_idx):
         """验证步骤，由子类实现"""
         raise NotImplementedError("Subclasses should implement this method")
 

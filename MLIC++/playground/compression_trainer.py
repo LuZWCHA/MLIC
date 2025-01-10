@@ -104,7 +104,8 @@ class Trainer(BaseTrainer):
         if self.args.pretrained:
             checkpoint = torch.load(self.args.pretrained)
             new_sd = {k.replace("module.", ""): v for k, v in checkpoint['state_dict'].items()}
-            model.load_state_dict(new_sd)
+
+            model.load_pretrained(new_sd)
 
         if self.ddp_enable:
             model = torch.nn.parallel.DistributedDataParallel(model, device_ids=[self.local_rank])
@@ -214,7 +215,7 @@ class Trainer(BaseTrainer):
             "lpips": self.val_lpips.avg,
         }
 
-    def train_step(self, batch, scaler):
+    def train_step(self, batch, scaler, epoch, batch_idx):
         """训练步骤"""
         images = batch["image"].to(self.device)
         self.optimizer.zero_grad()
@@ -250,7 +251,7 @@ class Trainer(BaseTrainer):
         
         return losses
 
-    def val_step(self, batch):
+    def val_step(self, batch, epoch, batch_idx):
         """验证步骤"""
         images = batch["image"].to(self.device)
         paths = batch["path"]
@@ -273,11 +274,13 @@ class Trainer(BaseTrainer):
         psnr, ms_ssim, lpips_m, dists = compute_metrics(rec, img)
         
         stem = Path(paths[0]).stem
-        if not os.path.exists(self.val_images_dir):
-            os.makedirs(self.val_images_dir)
-        rec.save(os.path.join(self.val_images_dir, '%s_rec.png' % stem))
-        img.save(os.path.join(self.val_images_dir, '%s_gt.png' % stem))
-
+        
+        save_dir = os.path.join(self.val_images_dir, f"{epoch}")
+        if not os.path.exists(save_dir):
+            os.makedirs(save_dir)
+        rec.save(os.path.join(save_dir, '%s_rec.png' % stem))
+        img.save(os.path.join(save_dir, '%s_gt.png' % stem))
+        
         if out_criterion["mse_loss"] is not None:
             smiliar = out_criterion["mse_loss"]
             
@@ -332,7 +335,7 @@ class VBRTrainer(Trainer):
             alpha /= alpha.sum()
         return alpha
     
-    def train_step(self, batch, scaler:torch.cuda.amp.GradScaler):
+    def train_step(self, batch, scaler:torch.cuda.amp.GradScaler, epoch, batch_idx):
         """训练步骤"""
         self.model: MLICPlusPlusSDVbr
         images = batch["image"].to(self.device)
@@ -410,7 +413,7 @@ class VBRTrainer(Trainer):
         
         return losses
     
-    def val_step(self, batch, level):
+    def val_step(self, batch,  epoch, batch_idx, level):
         """验证步骤"""
         images = batch["image"].to(self.device)
         paths = batch["path"]
@@ -433,10 +436,12 @@ class VBRTrainer(Trainer):
         psnr, ms_ssim, lpips_m, dists = compute_metrics(rec, img)
         
         stem = Path(paths[0]).stem
-        if not os.path.exists(self.val_images_dir):
-            os.makedirs(self.val_images_dir)
-        rec.save(os.path.join(self.val_images_dir, '%s_rec_lv%03d.png' % stem % level))
-        img.save(os.path.join(self.val_images_dir, '%s_gt_lv%03d.png' % stem % level))
+        
+        save_dir = os.path.join(self.val_images_dir, f"{epoch}")
+        if not os.path.exists(save_dir):
+            os.makedirs(save_dir)
+        rec.save(os.path.join(save_dir, '%s_rec_lv%03d.png' % stem % level))
+        img.save(os.path.join(save_dir, '%s_gt_lv%03d.png' % stem % level))
 
         if out_criterion["mse_loss"] is not None:
             smiliar = out_criterion["mse_loss"]
@@ -478,7 +483,7 @@ class VBRTrainer(Trainer):
             with torch.inference_mode():
                 for batch_idx, batch in enumerate(self.test_loader):
                     # 执行验证步骤
-                    step_metrics_levels = self.val_step(batch, level=i)
+                    step_metrics_levels = self.val_step(batch,  epoch, batch_idx, level=i)
 
                     # 更新验证指标
                     self._update_val_metrics(step_metrics_levels)

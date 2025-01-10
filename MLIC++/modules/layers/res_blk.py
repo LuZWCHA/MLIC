@@ -23,12 +23,12 @@ class AttentionBlock(nn.Module):
         class ResidualUnit(nn.Module):
             """Simple residual unit."""
 
-            def __init__(self):
+            def __init__(self, use_deep_wise_conv=True):
                 super().__init__()
                 self.conv = nn.Sequential(
                     conv1x1(N, N // 2),
                     nn.GELU(),
-                    conv3x3(N // 2, N // 2),
+                    conv3x3(N // 2, N // 2, use_deep_wise_conv=use_deep_wise_conv),
                     nn.GELU(),
                     conv1x1(N // 2, N),
                 )
@@ -68,11 +68,11 @@ class ResidualBlockWithStride(nn.Module):
         stride (int): stride value (default: 2)
     """
 
-    def __init__(self, in_ch: int, out_ch: int, stride: int = 2):
+    def __init__(self, in_ch: int, out_ch: int, stride: int = 2, use_deep_wise_conv=True):
         super().__init__()
-        self.conv1 = conv3x3(in_ch, out_ch, stride=stride)
+        self.conv1 = conv3x3(in_ch, out_ch, stride=stride, use_deep_wise_conv=use_deep_wise_conv)
         self.act = nn.GELU()
-        self.conv2 = conv3x3(out_ch, out_ch)
+        self.conv2 = conv3x3(out_ch, out_ch, use_deep_wise_conv=use_deep_wise_conv)
         self.gdn = GDN(out_ch)
         if stride != 1 or in_ch != out_ch:
             self.skip = conv1x1(in_ch, out_ch, stride=stride)
@@ -102,11 +102,11 @@ class ResidualBlockUpsample(nn.Module):
         upsample (int): upsampling factor (default: 2)
     """
 
-    def __init__(self, in_ch: int, out_ch: int, upsample: int = 2):
+    def __init__(self, in_ch: int, out_ch: int, upsample: int = 2, use_deep_wise_conv=True):
         super().__init__()
         self.subpel_conv = subpel_conv3x3(in_ch, out_ch, upsample)
         self.act = nn.GELU()
-        self.conv = conv3x3(out_ch, out_ch)
+        self.conv = conv3x3(out_ch, out_ch, use_deep_wise_conv=use_deep_wise_conv)
         self.igdn = GDN(out_ch, inverse=True)
         self.upsample = subpel_conv3x3(in_ch, out_ch, upsample)
 
@@ -129,11 +129,11 @@ class ResidualBlock(nn.Module):
         out_ch (int): number of output channels
     """
 
-    def __init__(self, in_ch: int, out_ch: int):
+    def __init__(self, in_ch: int, out_ch: int, use_deep_wise_conv=True):
         super().__init__()
-        self.conv1 = conv3x3(in_ch, out_ch)
+        self.conv1 = conv3x3(in_ch, out_ch, use_deep_wise_conv=use_deep_wise_conv)
         self.act = nn.GELU()
-        self.conv2 = conv3x3(out_ch, out_ch)
+        self.conv2 = conv3x3(out_ch, out_ch, use_deep_wise_conv=use_deep_wise_conv)
         if in_ch != out_ch:
             self.skip = conv1x1(in_ch, out_ch)
         else:

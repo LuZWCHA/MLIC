@@ -7,7 +7,7 @@ from compressai.ops import quantize_ste as ste_round
 from compressai.ans import BufferedRansEncoder, RansDecoder
 from utils.func import update_registered_buffers, get_scale_table
 from utils.ckbd import *
-from modules.transform import *
+from modules.transform import SynthesisTransform, HyperSynthesis, EntropyParameters, LatentResidualPrediction, LatentResidualPredictionOld, LocalContext
 
 from modules.transform.analysis_old import AnalysisTransform, HyperAnalysis
 from modules.transform.context_old import ChannelContext, LinearGlobalInterContext, LinearGlobalIntraContext
@@ -46,6 +46,7 @@ class MLICPlusPlusSD(CompressionModel):
             for _ in range(slice_num)
         )
 
+        ## Small channel_context
         self.channel_context = nn.ModuleList(
             ChannelContext(in_dim=slice_ch * i, out_dim=slice_ch, hidden=[96, 96]) if i else None
             for i in range(slice_num)
@@ -481,15 +482,31 @@ class MLICPlusPlusSD(CompressionModel):
         updated |= super().update(force=force)
         return updated
 
-    def load_pretrained(self, state_dict):
-        remove_keys = []
-        for (k1, v1), (k2, v2) in zip(self.state_dict().items(), state_dict.items()):
-            if (v1.shape != v2.shape or k1 != k2) and "gaussian_conditional" not in k2 and "entropy_bottleneck" not in k2:
-                remove_keys.append(k2)
+    @staticmethod
+    def load_matching_state_dict(model, checkpoint_state_dict):
+        """
+        选择性加载检查点的 state_dict，仅加载形状匹配的参数。
+
+        :param model: 模型。
+        :param checkpoint_state_dict: 检查点的 state_dict。
+        """
+        model_state_dict = model.state_dict()
+        for key in model_state_dict:
+            if key in checkpoint_state_dict:
+                if model_state_dict[key].shape == checkpoint_state_dict[key].shape:
+                    # model_state_dict[key] = checkpoint_state_dict[key]
+                    print(f"Key '{key}': Loaded successfully.")
+                else:
+                    if "gaussian_conditional" not in key and "entropy_bottleneck" not in key:
+                        del checkpoint_state_dict[key]
+                        print(f"Key '{key}': Shape mismatch! Skipping...")
             else:
-                print(f"Keep {k2}")
-        for i in remove_keys:
-            del state_dict[i]
+                print(f"Key '{key}': Not found in checkpoint. Skipping...")
+        
+        return model
+
+    def load_pretrained(self, state_dict):
+        self.load_matching_state_dict(self, state_dict)
         self.load_state_dict(state_dict, strict=False)
 
     def frezze_some_layers(self):

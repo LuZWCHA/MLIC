@@ -7,12 +7,12 @@ class AnalysisTransform(nn.Module):
     def __init__(self, N, M):
         super().__init__()
         self.analysis_transform = nn.Sequential(
-            ResidualBlockWithStride(3, N, stride=2),
-            ResidualBlock(N, N),
-            ResidualBlockWithStride(N, N, stride=2),
-            ResidualBlock(N, N),
-            ResidualBlockWithStride(N, N, stride=2),
-            ResidualBlock(N, N),
+            ResidualBlockWithStride(3, N, stride=2, use_deep_wise_conv=False),
+            ResidualBlock(N, N, use_deep_wise_conv=False),
+            ResidualBlockWithStride(N, N, stride=2, use_deep_wise_conv=False),
+            ResidualBlock(N, N, use_deep_wise_conv=False),
+            ResidualBlockWithStride(N, N, stride=2, use_deep_wise_conv=False),
+            ResidualBlock(N, N, use_deep_wise_conv=False),
             conv3x3(N, M, stride=2, use_deep_wise_conv=False)
         )
 
