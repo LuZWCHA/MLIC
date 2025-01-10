@@ -9,6 +9,36 @@ conda
 conda env create -f environment.yml
 ```
 
+# Models
+I have add some models with new model name, you can use them by changing the model name in the config file. The models are:
+- `MLICPP_L`: MLIC++, the vallina version
+- `MLICPP_S`: MLIC++ with small model size
+- `MLICPP_M`: MLIC++ with medium model size
+- `MLICPP_S2`: MLIC++ with small model size version 2
+- `MLICPP_M_SMALL_DEC`: MLIC++ small decoder the encoder is as same as MLICPP_L and the decoder is nearly 1/4 of the MLICPP_L (the convlution layers of the decoder are replaced with depthwise separable convolution layers)
+- `MLICPP_XXX_VBR`: MLIC++ variable bit rate version, the bit rate is controlled by the lambda value in model's self.lambda var.
+
+## MACs
+The MACs (with the input size 1920x1088) of the models (only decoders) are as follows:
+- `MLICPP_L`: 1620 GMacs
+- `MLICPP_S`: 436.35 GMacs with normal conv2d; 204.55 GMacs with depthwise conv
+- `MLICPP_M`: 1120 GMacs with normal conv2d; 524.85 GMACs with depthwise conv
+- `MLICPP_S2`: 436.35 GMacs with normal conv2d; 204.55 GMacs with depthwise conv
+- `MLICPP_M_SMALL_DEC`: nearly 186 GMacs with depthwise conv
+
+> 198 GMACs is nearly 1e5 MACs/pixel
+2000 GMACs is nearly 1e6 MACs/pixel
+
+NOTE: The VBR versions only increase about 100 parameters with a few MACs that can be ignored.
+
+You can get the MACs by run test.sh with the following command:
+```
+## Modify the --model_name parameter in test.sh to the model you want to test.
+## All model names can be find in MLIC++/configs/config.py or MLIC++/models/model_loader.py.
+sh test.sh
+```
+
+----
 # MLIC Series [ACMMM 2023 / NCW ICML 2023]
 
 This repo contains the official implementation of MLIC <sup> ++ </sup>. 

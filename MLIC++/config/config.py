@@ -56,7 +56,7 @@ def model_config(model_name="MLICPP_S"):
             "slice_num": 10,
             "context_window": 5,
             "act": nn.GELU,
-        }) # 1620 GMacs normal conv2d
+        }) 
 
 
     return config
