@@ -24,13 +24,13 @@ class Trainer(BaseTrainer):
 
     def __init__(self, args=None, **kwargs):
         super().__init__(args, **kwargs)
-        self.eval_first = True
+        self.eval_first = False
         if self.is_main_process():
             self.logger_train.info(get_system_info_str())
 
     def _load_checkpoint(self):
         """加载模型检查点，支持恢复训练或仅加载模型权重"""
-        checkpoint = torch.load(self.args.checkpoint)
+        checkpoint = torch.load(self.args.checkpoint, map_location='cpu')
 
         # 处理模型权重（移除 "module." 前缀以兼容单机和分布式训练）
         new_sd = {}
@@ -72,14 +72,16 @@ class Trainer(BaseTrainer):
         ])
         self.train_dataset = ImageFolder2(self.args.dataset, split="train", transform=train_transforms)
 
-        self.train_sampler = DistributedSampler(self.train_dataset) if self.ddp_enable else None
+        self.train_sampler = DistributedSampler(self.train_dataset, rank=self.local_rank) if self.ddp_enable else None
         train_loader = DataLoader(
             self.train_dataset,
             batch_size=self.args.batch_size,
             num_workers=self.args.num_workers,
             shuffle=(self.train_sampler is None),
-            pin_memory=(self.device == "cuda"),
-            sampler=self.train_sampler
+            pin_memory=True,
+            pin_memory_device=str(self.device),
+            sampler=self.train_sampler,
+            persistent_workers=True
         )
         return train_loader
         
@@ -102,13 +104,13 @@ class Trainer(BaseTrainer):
     def _setup_model(self):
         model = get_model(self.args.model_name).to(self.device)
         if self.args.pretrained:
-            checkpoint = torch.load(self.args.pretrained)
+            checkpoint = torch.load(self.args.pretrained, map_location='cpu')
             new_sd = {k.replace("module.", ""): v for k, v in checkpoint['state_dict'].items()}
 
             model.load_pretrained(new_sd)
 
         if self.ddp_enable:
-            model = torch.nn.parallel.DistributedDataParallel(model, device_ids=[self.local_rank])
+            model = torch.nn.parallel.DistributedDataParallel(model, device_ids=[self.local_rank], output_device=self.local_rank, gradient_as_bucket_view=True)
             
         return model
 
@@ -233,6 +235,7 @@ class Trainer(BaseTrainer):
         
         if self.args.clip_max_norm > 0:
             scaler.unscale_(self.aux_optimizer)
+            scaler.unscale_(self.optimizer)
             torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.args.clip_max_norm)
         
         scaler.step(self.aux_optimizer)
@@ -271,7 +274,7 @@ class Trainer(BaseTrainer):
 
         rec = torch2img(out_net['x_hat'])
         img = torch2img(images)
-        psnr, ms_ssim, lpips_m, dists = compute_metrics(rec, img)
+        psnr, ms_ssim, lpips_m, dists = compute_metrics(rec, img, device=self.device)
         
         stem = Path(paths[0]).stem
         
@@ -441,7 +444,7 @@ class VBRTrainer(Trainer):
 
         rec = torch2img(out_net['x_hat'])
         img = torch2img(images)
-        psnr, ms_ssim, lpips_m, dists = compute_metrics(rec, img)
+        psnr, ms_ssim, lpips_m, dists = compute_metrics(rec, img, device=self.device)
         
         stem = Path(paths[0]).stem
         

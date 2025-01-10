@@ -147,6 +147,8 @@ class BaseTrainer:
 
     def train_stage(self, epoch):
         # 训练一个 epoch
+        print(f"Wait...{self.local_rank}")
+        dist.barrier()
         self.train_epoch(epoch)
 
     def eval_stage(self, epoch):
@@ -231,7 +233,7 @@ class BaseTrainer:
         # 记录日志
         if self.is_main_process():
             self._log_val(epoch)
-
+        torch.cuda.empty_cache()
         # 返回验证指标
         return self._get_val_metrics()
 
