@@ -160,12 +160,12 @@ class StyleLoss(nn.Module):
 class RateDistortionPOELICLoss(nn.Module):
     """Custom rate distortion loss with a Lagrangian parameter."""
 
-    def __init__(self, lmbda=1e-2, device = "cuda", gpu_id=None):
+    def __init__(self, lmbda=1e-2):
         super().__init__()
         self.charbonnier = CharbonnierLoss()
         self.gan = GANLoss()
         self.style = StyleLoss()
-        self.lpips =  lpips.LPIPS(net='vgg', verbose=False)
+        self.lpips =  lpips.LPIPS(net='vgg', verbose=False, eval_mode=True)
 
         self.lmbda = lmbda
         self.vgg = Vgg16().eval()
@@ -190,12 +190,15 @@ class RateDistortionPOELICLoss(nn.Module):
         
         x_tidle_patch = x_tidle.unfold(3, kernel_h, kernel_w).unfold(2, kernel_h, kernel_w).permute(2, 3, 0, 1, 4, 5).reshape(-1, 3, kernel_h, kernel_w)
         target_patch = target.unfold(3, kernel_h, kernel_w).unfold(2, kernel_h, kernel_w).permute(2, 3, 0, 1, 4, 5).reshape(-1, 3, kernel_h, kernel_w)
-
+        # (N, C, kernel_h, kernel_w)，其中 N = (H // kernel_h) * (W // kernel_w) * B
+        # C=3, kernel_h=16, kernel_w=16
+        
+        # 将 x_tidle_patch 和 target_patch 输入到 vgg 网络中
         x_tidle_feat  = self.vgg(x_tidle_patch)
         target_feat = self.vgg(target_patch)
-
+        
         out["charbonnier"] = self.charbonnier(x_hat, x_tidle)
-        out["lpips"]       = self.lpips.forward(x_tidle, target, normalize=True)
+        out["lpips_loss"]  = self.lpips.forward(x_tidle_patch, target_patch, normalize=True)
         
         x_tidle_feat  = [feat for feat in  x_tidle_feat]
         target_feat = [feat for feat in  target_feat]
@@ -214,5 +217,5 @@ class RateDistortionPOELICLoss(nn.Module):
         "lambda_gan": 1,
         "lambda_rate": 0.3,
         '''
-        out["loss"] = self.lmbda * 255**2 * out["charbonnier"] + out["bpp_loss"] + out["lpips"] + 100 * out["style_loss"]
+        out["loss"] = self.lmbda * 255**2 * out["charbonnier"] + out["bpp_loss"] + out["lpips_loss"] + 100 * out["style_loss"]
         return out

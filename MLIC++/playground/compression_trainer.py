@@ -7,7 +7,7 @@ from torch.utils.data import DataLoader, DistributedSampler
 from torchvision import transforms
 from utils.utils import AverageMeter, disable_logging_prefix, get_system_info_str, pretty_print_dict
 from utils.optimizers import configure_optimizers, configure_optimizers_mmo
-from loss.rd_loss import RateDistortionLoss
+from loss.rd_loss import RateDistortionLoss, RateDistortionPOELICLoss
 from models import get_model
 from playground.dataset import ImageFolder2, RandomResize
 from utils.metrics import compute_metrics
@@ -304,13 +304,7 @@ class Trainer(BaseTrainer):
             self.logger_val.info(pretty_print_dict([metrics]))
         
         return metrics
-        
-if __name__ == '__main__':
-    from config.args import train_options
-    args = train_options()
-    trainer = Trainer(args)
-    trainer.fit()
-    
+
 
 from models import *
 class VBRTrainer(Trainer):
@@ -337,19 +331,27 @@ class VBRTrainer(Trainer):
     
     def train_step(self, batch, scaler:torch.cuda.amp.GradScaler, epoch, batch_idx):
         """训练步骤"""
-        self.model: MLICPlusPlusSDVbr
+        self.model
         images = batch["image"].to(self.device)
         self.optimizer.zero_grad()
         self.aux_optimizer.zero_grad()
         gradients_theta = []
         gradients_shared = []
+        
+        if isinstance(self.model, torch.nn.parallel.DistributedDataParallel):
+            actual_model: MLICPlusPlusSDVbr = self.model.module
+        else:
+            actual_model: MLICPlusPlusSDVbr = self.model
+                
         N = self.model.levels
-        shared_parameters, _ = self.model.mmo_parameters()
+        shared_parameters, _ = actual_model.mmo_parameters()
 
         with torch.cuda.amp.autocast(enabled=self.args.amp):
             for i in range(N):
                 self.gain_optimizers[i].zero_grad()
                 out_net = self.model.forward(images, stage=2, s=i)
+                
+                self.criterion.set_lmbda(actual_model.lmbda[i])
                 out_criterion = self.criterion(out_net, images)
                 loss = out_criterion["loss"]
                 # Collect gradients for θ
@@ -388,7 +390,7 @@ class VBRTrainer(Trainer):
     
         scaler.step(self.optimizer)
 
-        aux_loss = self.model.module.aux_loss() if self.ddp_enable else self.model.aux_loss()
+        aux_loss = actual_model.aux_loss()
         scaler.scale(aux_loss).backward()
         
         if self.args.clip_max_norm > 0:
@@ -415,6 +417,12 @@ class VBRTrainer(Trainer):
     
     def val_step(self, batch,  epoch, batch_idx, level):
         """验证步骤"""
+        
+        if isinstance(self.model, torch.nn.parallel.DistributedDataParallel):
+            actual_model = self.model.module
+        else:
+            actual_model = self.model
+        
         images = batch["image"].to(self.device)
         paths = batch["path"]
         B, C, H, W = images.shape
@@ -423,11 +431,11 @@ class VBRTrainer(Trainer):
         pad_w = 0 if W % 64 == 0 else 64 * (W // 64 + 1) - W
         images_pad = F.pad(images, (0, pad_w, 0, pad_h), mode='constant', value=0)        
         
-        out_net = self.model.module(images_pad, s=level) if self.ddp_enable else self.model(images_pad)
+        out_net = actual_model(images_pad, s=level)
         out_net['x_hat'] = out_net['x_hat'][:, :, :H, :W]
         out_criterion = self.criterion(out_net, images)
 
-        aux_loss = self.model.module.aux_loss() if self.ddp_enable else self.model.aux_loss()
+        aux_loss = actual_model.aux_loss()
         bpp_loss = out_criterion["bpp_loss"]
         loss = out_criterion["loss"]
 
@@ -505,7 +513,6 @@ class VBRTrainer(Trainer):
         )
         self.logger_val.info(log_message)
         # 提取 TensorBoard 日志标签
-        
         tb_val_loss_tag = f'Val/Loss_lv{level}'
         tb_val_bpp_tag = f'Val/Bpp_lv{level}'
         tb_val_psnr_tag = f'Val/PSNR_lv{level}'
@@ -518,3 +525,15 @@ class VBRTrainer(Trainer):
         self.tb_logger.add_scalar(tb_val_ms_ssim_tag, self.val_ms_ssim.avg, epoch + 1)
         self.tb_logger.add_scalar(tb_val_dist_tag, self.val_dists.avg, epoch + 1)
         self.tb_logger.add_scalar(tb_val_lpips_tag, self.val_lpips.avg, epoch + 1)
+
+
+class POELIC_Loss_Trainer(Trainer):
+    
+    def _setup_criterion(self):
+        return RateDistortionPOELICLoss(lmbda=self.args.lmbda, metrics=self.args.metrics)
+
+if __name__ == '__main__':
+    from config.args import train_options
+    args = train_options()
+    trainer = Trainer(args)
+    trainer.fit()
