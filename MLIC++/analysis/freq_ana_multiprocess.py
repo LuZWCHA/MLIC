@@ -106,7 +106,7 @@ def analyze_dataset_frequency_bands(dataset_dir, num_bands=10, target_grid_size=
         # 将任务分配到多个进程
         results = pool.starmap(
             process_image,
-            [(image_path, num_bands, target_grid_size) for image_path in image_paths[:10000]]
+            [(image_path, num_bands, target_grid_size) for image_path in image_paths[:100]]
         )
     
     # 合并结果

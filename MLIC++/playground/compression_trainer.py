@@ -1,3 +1,4 @@
+import csv
 import math
 import os
 from pathlib import Path
@@ -9,7 +10,7 @@ from torch.utils.data import DataLoader, DistributedSampler
 from torchvision import transforms
 from utils.utils import AverageMeter, disable_logging_prefix, get_system_info_str, pretty_print_dict
 from utils.optimizers import configure_optimizers, configure_optimizers_mmo
-from loss.rd_loss import RateDistortionLoss, RateDistortionPOELICLoss
+from loss.rd_loss import RateDistortionLoss, RateDistortionLossExp, RateDistortionPOELICLoss
 from models import get_model
 from playground.dataset import ImageFolder2, RandomResize
 from utils.metrics import compute_metrics
@@ -686,7 +687,7 @@ class VBRTrainer(Trainer):
         """验证一个 epoch"""
         self.model.eval()
 
-        for i in range(self.model.levels):
+        for i in range(self.model.module.levels):
         # 初始化验证指标
             self._init_val_metrics()
 
@@ -734,11 +735,202 @@ class POELIC_Loss_Trainer(Trainer):
     def _setup_criterion(self):
         return RateDistortionPOELICLoss(lmbda=self.args.lmbda, metrics=self.args.metrics)
 
+
+class EXPTrainer(Trainer):
+
+    def __init__(self, args=None, **kwargs):
+        super().__init__(args, **kwargs)
+        self.eval_first = False
+        if self.is_main_process():
+            self.logger_train.info(get_system_info_str())
+
+    def _setup_criterion(self):
+        self.criterion = RateDistortionLossExp(lmbda=self.args.lmbda, metrics=self.args.metrics)
+
+    def _setup_test_data(self):
+        """初始化测试数据集"""
+        test_transforms = transforms.Compose([transforms.ToTensor()])
+        self.test_dataset = ImageFolder2(self.args.dataset, split="train", transform=test_transforms)
+
+        test_loader = DataLoader(
+            self.test_dataset,
+            batch_size=self.args.test_batch_size,
+            num_workers=self.args.num_workers,
+            shuffle=False,
+            pin_memory=(self.device == "cuda")
+        )
+        return test_loader
+
+    def val_step(self, batch, epoch, batch_idx):
+        """验证步骤，同时统计每张图片的 bpp 和 similarity loss"""
+        images = batch["image"].to(self.device)
+        paths = batch["path"]
+        B, C, H, W = images.shape
+
+        # 填充图像以确保尺寸是 64 的倍数
+        pad_h = 0 if H % 64 == 0 else 64 * (H // 64 + 1) - H
+        pad_w = 0 if W % 64 == 0 else 64 * (W // 64 + 1) - W
+        images_pad = F.pad(images, (0, pad_w, 0, pad_h), mode='constant', value=0)
+
+        # 前向计算
+        out_net = self.model.module(images_pad) if self.ddp_enable else self.model(images_pad)
+        out_net['x_hat'] = out_net['x_hat'][:, :, :H, :W]
+        out_criterion = self.criterion(out_net, images)
+
+        # 获取 bpp 和 similarity loss
+        bpp = out_criterion["bpp_loss"].cpu().numpy()  # 转换为 numpy 数组
+        if out_criterion["mse_loss"] is not None:
+            similarity_loss = out_criterion["mse_loss"].cpu().numpy()
+        elif out_criterion["ms_ssim_loss"] is not None:
+            similarity_loss = out_criterion["ms_ssim_loss"].cpu().numpy()
+        else:
+            similarity_loss = [None] * len(paths)  # 如果没有 similarity loss，填充为 None
+
+        # 将结果添加到统计列表中
+        for i, path in enumerate(paths):
+            self.statistics.append({
+                "image_path": path,
+                "bpp": float(bpp[i]) if bpp is not None else None,
+                "similarity_loss": float(similarity_loss[i]) if similarity_loss is not None else None
+            })
+
+        # 其他验证逻辑（如计算 PSNR、MS-SSIM 等）
+        aux_loss = self.model.module.aux_loss() if self.ddp_enable else self.model.aux_loss()
+        bpp_loss = out_criterion["bpp_loss"]
+        loss = out_criterion["loss"]
+
+        # rec = torch2img(out_net['x_hat'])
+        # img = torch2img(images)
+        # psnr, ms_ssim, lpips_m, dists = compute_metrics(rec, img, device=self.device)
+
+        stem = Path(paths[0]).stem
+        save_dir = os.path.join(self.val_images_dir, f"{epoch}")
+        if not os.path.exists(save_dir):
+            os.makedirs(save_dir)
+        # rec.save(os.path.join(save_dir, '%s_rec.png' % stem))
+        # img.save(os.path.join(save_dir, '%s_gt.png' % stem))
+
+        if out_criterion["mse_loss"] is not None:
+            smiliar = out_criterion["mse_loss"]
+        elif out_criterion["ms_ssim_loss"] is not None:
+            smiliar = out_criterion["ms_ssim_loss"]
+
+        metrics = {
+            "path": Path(batch["path"][0]).name,
+            "loss": loss.item(),
+            "aux_loss": aux_loss.item(),
+            "bpp_loss": bpp_loss.item(),
+            "similar_loss": smiliar.item(),
+            # "psnr": psnr,
+            # "ms_ssim": ms_ssim,
+            # "lpips": lpips_m,
+            # "dists": dists,
+        }
+
+        # 记录日志
+        if self.is_main_process():
+            with disable_logging_prefix(self.logger_val):
+                self.logger_val.info(pretty_print_dict([metrics]))
+
+        return metrics
+
+    def validate_epoch(self, epoch):
+        """验证一个 epoch，并在验证完成后保存统计结果"""
+        self.model.eval()
+        self.statistics = []  # 清空统计结果
+
+        # 执行验证
+        with torch.no_grad():
+            for batch_idx, batch in enumerate(self.test_loader):
+                self.val_step(batch, epoch, batch_idx)
+
+        # 如果是多 GPU 环境，将结果汇聚到主进程
+        if self.ddp_enable:
+            # 将所有进程的结果收集到主进程
+            gathered_results = [None] * dist.get_world_size()
+            dist.gather_object(self.statistics, gathered_results if self.is_main_process() else None, dst=0)
+
+            # 主进程合并所有结果
+            if self.is_main_process():
+                self.statistics = []
+                for res in gathered_results:
+                    if res is not None:
+                        self.statistics.extend(res)
+        else:
+            # 单 GPU 环境，直接使用当前结果
+            pass
+
+        # 主进程保存结果到 CSV 文件
+        if self.is_main_process():
+            csv_file = os.path.join(self.experiment_dir, f"statistics_epoch{epoch}.csv")
+            with open(csv_file, mode='w', newline='') as file:
+                writer = csv.DictWriter(file, fieldnames=["image_path", "bpp", "similarity_loss"])
+                writer.writeheader()
+                writer.writerows(self.statistics)
+
+            self.logger_val.info(f"Statistics saved to {csv_file}")
+
+        # 返回验证指标
+        return self._get_val_metrics()
+    
+    
+    def _get_val_metrics(self):
+        """获取验证指标, 计算best loss来保存checkpoint"""
+        return {
+            "loss": 0,
+            # "bpp_loss": self.val_bpp_loss.avg,
+            # # "psnr": self.val_psnr.avg,
+            # "ms_ssim": self.val_ms_ssim.avg,
+            # # "dist": self.val_dists.avg,
+            # # "lpips": self.val_lpips.avg,
+        }
+        
+        
+    def _load_checkpoint(self):
+        """加载模型检查点，支持恢复训练或仅加载模型权重"""
+        checkpoint = torch.load(self.args.checkpoint, map_location='cpu')
+
+        # 处理模型权重（移除 "module." 前缀以兼容单机和分布式训练）
+        new_sd = {}
+        for k, v in checkpoint['state_dict'].items():
+            while k.startswith("module."):
+                k = k[7:]  # 移除 "module." 前缀
+            new_sd[k] = v
+            
+        if self.ddp_enable:
+            self.model.module.load_state_dict(new_sd, strict=True)
+        else:
+            self.model.load_state_dict(new_sd, strict=True)
+
+        print(f"Load successful: {self.args.checkpoint}")
+        
+        # 如果是从检查点恢复训练
+        if self.args.resume:
+            self.optimizer.load_state_dict(checkpoint['optimizer'])
+            self.aux_optimizer.load_state_dict(checkpoint['aux_optimizer'])
+
+            # 重新初始化学习率调度器
+            self.lr_scheduler = torch.optim.lr_scheduler.MultiStepLR(
+                self.optimizer, milestones=[450, 550], gamma=0.1
+            )
+
+            # 恢复训练状态
+            self.start_epoch = checkpoint['epoch']
+            self.best_loss = checkpoint['loss']
+            self.current_step = self.start_epoch * math.ceil(len(self.train_loader.dataset) / self.args.batch_size)
+
+        # 释放检查点以节省内存
+        checkpoint = None
 if __name__ == '__main__':
     from config.args import train_options
     args = train_options()
-    if not args.vbr:
-        trainer = Trainer(args)
+    
+    if not args.statistic:
+        if not args.vbr:
+            trainer = Trainer(args)
+        else:
+            trainer = VBRTrainer(args)
+        trainer.fit()
     else:
-        trainer = VBRTrainer(args)
-    trainer.fit()
+        trainer = EXPTrainer(args)
+        trainer.validate_epoch(0)

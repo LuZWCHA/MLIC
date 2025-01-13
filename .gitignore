@@ -10,3 +10,4 @@ log
 MLIC++/playground/experiments
 github_token.txt
 **/*.pth
+/MLIC++/analysis/simple_cache/

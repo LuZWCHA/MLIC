@@ -20,7 +20,12 @@ def train_options():
         "--vbr",
         action="store_true",
         help="Variable bitrate enable"
-    )  
+    ) 
+    parser.add_argument(
+        "--statistic",
+        action="store_true",
+        help="Statistic"
+    )
     parser.add_argument(
         "--resume",
         action="store_true",
