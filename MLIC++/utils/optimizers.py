@@ -62,8 +62,8 @@ def configure_optimizers_mmo(net, args, keys=["Gain", "gain"]):
 
     # Make sure we don't have an intersection of parameters
     params_dict = dict(net.named_parameters())
-    inter_params = set(parameters) & set(aux_parameters)
-    union_params = set(parameters) | set(aux_parameters)
+    inter_params = set(parameters) & set(aux_parameters) & set(gain_parameters)
+    union_params = set(parameters) | set(aux_parameters) | set(gain_parameters)
 
     assert len(inter_params) == 0
     assert len(union_params) - len(params_dict.keys()) == 0
@@ -90,13 +90,10 @@ def configure_optimizers_mmo(net, args, keys=["Gain", "gain"]):
     )
     
     assert len(gain_parameters) == 1
-    gain_parameter = gain_parameters[0]
+    # gain_parameter = gain_parameters[0]
     
-    gain_optimizers = []
-    for i in len(gain_parameter):
-        gain_optimizers.append(optim_cls(
-            (p for p in gain_parameter[i] if p.requires_grad),
+    gain_optimizer = optim_cls(
+            gain_parameters,
             lr=args.learning_rate,
-        ))
-    
-    return optimizer, aux_optimizer, gain_optimizers
+        )
+    return optimizer, aux_optimizer, gain_optimizer

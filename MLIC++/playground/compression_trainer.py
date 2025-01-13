@@ -1,6 +1,8 @@
 import math
 import os
 from pathlib import Path
+import random
+import time
 import torch
 import torch.distributed as dist
 from torch.utils.data import DataLoader, DistributedSampler
@@ -223,20 +225,37 @@ class Trainer(BaseTrainer):
         self.optimizer.zero_grad()
         self.aux_optimizer.zero_grad()
 
+        # 优化混合精度训练范围
         with torch.cuda.amp.autocast(enabled=self.args.amp):
+            # 前向计算
             out_net = self.model(images)
+            # 损失计算
             out_criterion = self.criterion(out_net, images)
+            loss = out_criterion["loss"]
 
-        scaler.scale(out_criterion["loss"]).backward()
+        # 梯度缩放和反向传播
+        scaler.scale(loss).backward()
+
+        # 梯度裁剪（在unscale之后）
+        if self.args.clip_max_norm > 0:
+            scaler.unscale_(self.optimizer)
+            # 更高效的梯度裁剪
+            torch.nn.utils.clip_grad_norm_(
+                [p for p in self.model.parameters() if p.requires_grad],
+                self.args.clip_max_norm,
+                error_if_nonfinite=True
+            )
+
+        # 优化器更新
         scaler.step(self.optimizer)
+        scaler.update()
+
+        # 清空梯度
+        self.optimizer.zero_grad(set_to_none=True)
 
         aux_loss = self.model.module.aux_loss() if self.ddp_enable else self.model.aux_loss()
         scaler.scale(aux_loss).backward()
         
-        if self.args.clip_max_norm > 0:
-            scaler.unscale_(self.aux_optimizer)
-            scaler.unscale_(self.optimizer)
-            torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.args.clip_max_norm)
         
         scaler.step(self.aux_optimizer)
         scaler.update()
@@ -313,9 +332,100 @@ from models import *
 class VBRTrainer(Trainer):
     
     def _setup_optimizers(self):
-        self.optimizer, self.aux_optimizer, self.gain_optimizers = \
+        self.optimizer, self.aux_optimizer, self.gain_optimizer = \
         configure_optimizers_mmo(self.model, self.args)
+        self.prev_alpha = None
+    
+    def _setup_model(self):
+        model = get_model(self.args.model_name).to(self.device)
+        if self.args.pretrained:
+            checkpoint = torch.load(self.args.pretrained, map_location='cpu')
+            new_sd = {k.replace("module.", ""): v for k, v in checkpoint['state_dict'].items()}
+
+            model.load_pretrained(new_sd)
+
+        if self.ddp_enable:
+            model = torch.nn.parallel.DistributedDataParallel(model, device_ids=[self.local_rank], output_device=self.local_rank, gradient_as_bucket_view=True, find_unused_parameters=True)
+            
+        return model
+    
+    @staticmethod
+    def line_search(alpha, gradients, M, t_hat):
+        """
+        Perform line search to find the optimal step size gamma.
+
+        Parameters:
+        - alpha: Current weights. Shape: (T,)
+        - gradients: Tensor of gradients. Shape: (T, N), where N is the total number of parameters.
+        - M: Precomputed Gram matrix. Shape: (T, T)
+        - t_hat: Index of the task to update. Scalar
+
+        Returns:
+        - gamma: Optimal step size. Scalar
+        """
+        grad_t_hat = gradients[t_hat]  # Shape: (N,)
+        M_alpha = torch.matmul(M, alpha)  # Shape: (T,)
+        numerator = torch.dot(grad_t_hat, torch.matmul(gradients.T, M_alpha)) - torch.dot(grad_t_hat, grad_t_hat)
+
+        # Compute the numerator and denominator for gamma
+        # numerator = torch.dot(grad_t_hat, torch.matmul(gradients, M_alpha)) - torch.dot(grad_t_hat, grad_t_hat)
+        denominator = torch.dot(grad_t_hat, torch.matmul(gradients.T, M[:, t_hat])) - torch.dot(grad_t_hat, grad_t_hat)
+
+        if denominator == 0:
+            gamma = 1.0
+        else:
+            gamma = numerator / denominator
+
+        # Clip gamma to [0, 1]
+        gamma = torch.clamp(gamma, 0.0, 1.0)
+
+        return gamma
+    
+    @staticmethod
+    def frank_wolfe_solver(gradients, max_iter=5, tol=1e-3, alpha_prev=None):
+        """
+        Frank-Wolfe solver for the optimization problem.
+
+        Parameters:
+        - gradients: A list of gradients of the loss functions with respect to the shared parameters.
+                    Each gradient is a torch.Tensor of shape (num_shared_params,).
+        - max_iter: Maximum number of iterations.
+        - tol: Tolerance for convergence.
+
+        Returns:
+        - alpha: The optimal weights for the gradients.
+        """
+        T, N = gradients.shape  # Number of tasks, number of shared parameters
         
+        # Initialize alpha (warm start if alpha_prev is provided)
+        if alpha_prev is None:
+            alpha = torch.ones(T, device=gradients.device) / T
+        else:
+            alpha = alpha_prev.clone()
+
+        # Precompute the Gram matrix M
+        M = torch.matmul(gradients, gradients.T)  # Shape: (T, T)
+
+        for iteration in range(max_iter):
+            # Step 1: Find the task with the smallest gradient in the current direction
+            grad_alpha = torch.matmul(M, alpha)
+            t_hat = torch.argmin(grad_alpha)
+
+            # Step 2: Perform line search to find the optimal step size gamma
+            gamma = VBRTrainer.line_search(alpha, gradients, M, t_hat)
+
+            # Step 3: Update alpha
+            alpha = (1 - gamma) * alpha
+            alpha[t_hat] += gamma
+
+            # Check for convergence
+            if gamma < tol:
+                break
+        
+        print(f"Iter: {iteration}")
+        return alpha
+
+
     
     def __min_norm_solver(self, gradients, max_iter=10):
         """最小范数求解器"""
@@ -323,20 +433,68 @@ class VBRTrainer(Trainer):
         alpha = torch.ones(N, device=gradients[0].device) / N
         for _ in range(max_iter):
             combined = torch.sum(alpha[:, None] * gradients, dim=0)
+            # dot_products = torch.stack([torch.sum(combined * g) for g in gradients])
+
             dot_products = torch.sum(combined * gradients, dim=1)
             min_idx = torch.argmin(dot_products)
             direction = torch.zeros_like(alpha)
             direction[min_idx] = 1.0 - alpha[min_idx]
+            
+            prev_alpha = alpha.clone()
             alpha += 0.5 * direction  # Update rule, can be adjusted
             alpha = torch.clamp(alpha, min=0.0)
             alpha /= alpha.sum()
+            
+            # 更新 alpha
+            if torch.norm(alpha - prev_alpha) < 1e-6:
+                break
         return alpha
+    
+    def __min_norm_solver_sgd(self, gradients, max_iter=100, tol=1e-6, batch_size=1):
+        """最小范数求解器（SGD 版本）"""
+        N = len(gradients)
+        device = gradients[0].device
+        
+        # 初始化 alpha（均匀分布）
+        alpha = torch.ones(N, device=device) / N
+        
+        for _ in range(max_iter):
+            # 随机选择一个 mini-batch
+            indices = torch.randperm(N)[:batch_size]
+            selected_gradients = [gradients[i] for i in indices]
+            
+            # 组合梯度
+            combined = torch.sum(alpha[indices, None] * selected_gradients, dim=0)
+            
+            # 计算点积（归一化梯度）
+            normalized_gradients = [g / torch.norm(g) for g in selected_gradients]
+            dot_products = torch.stack([torch.sum(combined * g) for g in normalized_gradients])
+            
+            # 找到最小点积的索引
+            min_idx = torch.argmin(dot_products)
+            
+            # 更新 alpha
+            direction = torch.zeros_like(alpha)
+            direction[indices[min_idx]] = 1.0 - alpha[indices[min_idx]]
+            alpha += 0.1 * direction  # 更平滑的更新
+            
+            # 确保 alpha 非负并归一化
+            alpha = torch.clamp(alpha, min=0.0)
+            alpha /= alpha.sum()
+            
+            # 收敛性检查
+            if _ > 0 and torch.norm(alpha - prev_alpha) < tol:
+                break
+            prev_alpha = alpha.clone()
+        
+        return alpha
+    
     
     def train_step(self, batch, scaler:torch.cuda.amp.GradScaler, epoch, batch_idx):
         """训练步骤"""
         self.model
         images = batch["image"].to(self.device)
-        self.optimizer.zero_grad()
+        
         self.aux_optimizer.zero_grad()
         gradients_theta = []
         gradients_shared = []
@@ -346,39 +504,72 @@ class VBRTrainer(Trainer):
         else:
             actual_model: MLICPlusPlusSDVbr = self.model
                 
-        N = self.model.levels
+        N = actual_model.levels
         shared_parameters, _ = actual_model.mmo_parameters()
-
+        
+        # Random 
+        random3tasks = range(N)
+        # print(len(shared_parameters))
+        loss_all = []
         with torch.cuda.amp.autocast(enabled=self.args.amp):
-            for i in range(N):
-                self.gain_optimizers[i].zero_grad()
+            for i in random3tasks:
+                # i = batch_idx % N
+                self.gain_optimizer.zero_grad()
+                self.optimizer.zero_grad()
                 out_net = self.model.forward(images, stage=2, s=i)
-                
+                aux_loss = actual_model.aux_loss()
                 self.criterion.set_lmbda(actual_model.lmbda[i])
                 out_criterion = self.criterion(out_net, images)
                 loss = out_criterion["loss"]
-                # Collect gradients for θ
-                gradients_theta = [sp.grad.detach().clone() for sp in shared_parameters]
-            
-                scaler.scale(loss).backward(retain_graph=True)
-                scaler.step(self.gain_optimizers[i])
+                loss_all.append(out_criterion)
+                scaler.scale(loss).backward()
+                scaler.scale(aux_loss).backward()
+                scaler.step(self.aux_optimizer)
+                scaler.step(self.gain_optimizer)
+                # Collect gradients for shared parameters of task i
+                gradients_theta = [sp.grad.detach().clone() for sp in shared_parameters if sp.grad is not None]
+
                 gradients_shared.append(gradients_theta)
 
+        loss_dict = dict()
+        
+        for ll in loss_all:
+            for k, v in ll.items():
+                if v is not None:
+                    if k in loss_dict:
+                        loss_dict[k] += v / N
+                    else:
+                        loss_dict[k] = v / N
+
+        
+        out_criterion = loss_dict
+        
         # Flatten gradients for easier handling
         flattened_gradients = [torch.cat([g.flatten() for g in grad_list]) for grad_list in gradients_shared]
         
         # Use MinNormSolver to find optimal alpha coefficients
-        alpha = self.__min_norm_solver(flattened_gradients)
-
-        # Combine gradients
-        combined_gradient = sum(alpha[i] * flattened_gradients[i] for i in range(self.model.levels))
+        # alpha = self.__min_norm_solver(flattened_gradients)
         
+        # Frank-Wolfe solver
+        start = time.time_ns()
+        alpha = self.frank_wolfe_solver(torch.stack(flattened_gradients, dim=0), alpha_prev=self.prev_alpha)
+        print(f"Cost: {(time.time_ns() - start) / 1e6} ms")
+        self.prev_alpha = alpha
+        
+        # Combine gradients
+        total_params = sum(p.numel() for p in shared_parameters)
+        combined_gradient = sum(alpha[i] * flattened_gradients[i] for i in range(len(random3tasks)))
+        
+        # Unflatten combined gradient and set to shared parameters
         # Unflatten combined gradient and set to shared parameters
         idx = 0
         for param in shared_parameters:
-            num_params = param.numel()
-            param.grad = combined_gradient[idx:idx+num_params].view(param.shape)
-            idx += num_params
+            if param.grad is not None:  # Only update parameters with valid gradients
+                num_params = param.numel()
+                if idx + num_params > total_params:
+                    raise RuntimeError(f"Invalid slice: idx={idx}, num_params={num_params}, total_params={total_params}")
+                param.grad = combined_gradient[idx:idx + num_params].view(param.shape)
+                idx += num_params
 
         if self.ddp_enable:
             world_size = dist.get_world_size()
@@ -386,23 +577,25 @@ class VBRTrainer(Trainer):
             world_size = 1
         
         # Synchronize combined gradients across all processes
-        for param in shared_parameters:
-            if self.ddp_enable:
-                dist.all_reduce(param.grad, op=dist.ReduceOp.SUM)
-            param.grad /= world_size  # Average gradients
-    
-        scaler.step(self.optimizer)
+        # Synchronize combined gradients across all processes (if using DDP)
+        if self.ddp_enable:
+            world_size = dist.get_world_size()
+            for param in shared_parameters:
+                if param.grad is not None:  # Only synchronize parameters with valid gradients
+                    dist.all_reduce(param.grad, op=dist.ReduceOp.SUM)
+                    param.grad /= world_size  # Average gradients
+        
 
-        aux_loss = actual_model.aux_loss()
-        scaler.scale(aux_loss).backward()
+        # aux_loss = actual_model.aux_loss()
+        # scaler.scale(aux_loss).backward()
         
         if self.args.clip_max_norm > 0:
-            # scaler.unscale_(self.optimizer)
-            scaler.unscale_(self.aux_optimizer)
+            scaler.unscale_(self.optimizer)
+            # scaler.unscale_(self.aux_optimizer)
             torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.args.clip_max_norm)
             # torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.args.clip_max_norm)
+        scaler.step(self.optimizer)
         
-        scaler.step(self.aux_optimizer)
         scaler.update()
 
         losses = {
@@ -538,5 +731,6 @@ class POELIC_Loss_Trainer(Trainer):
 if __name__ == '__main__':
     from config.args import train_options
     args = train_options()
-    trainer = Trainer(args)
+    # trainer = Trainer(args)
+    trainer = VBRTrainer(args)
     trainer.fit()

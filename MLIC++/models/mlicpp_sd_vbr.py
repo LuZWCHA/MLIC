@@ -7,8 +7,13 @@ from compressai.ops import quantize_ste as ste_round, LowerBound
 from compressai.ans import BufferedRansEncoder, RansDecoder
 from utils.func import update_registered_buffers, get_scale_table
 from utils.ckbd import *
-from modules.transform import *
+
 from compressai.entropy_models import EntropyBottleneck, EntropyBottleneckVbr
+
+from modules.transform import SynthesisTransform, HyperSynthesis, EntropyParameters, LatentResidualPrediction, LatentResidualPredictionOld, LocalContext
+
+from modules.transform.analysis_old import AnalysisTransform, HyperAnalysis
+from modules.transform.context_old import ChannelContext, LinearGlobalInterContext, LinearGlobalIntraContext
 
 
 class MLICPlusPlusSDVbr(CompressionModel):
@@ -46,7 +51,7 @@ class MLICPlusPlusSDVbr(CompressionModel):
         )
 
         self.channel_context = nn.ModuleList(
-            ChannelContext(in_dim=slice_ch * i, out_dim=slice_ch) if i else None
+            ChannelContext(in_dim=slice_ch * i, out_dim=slice_ch, hidden=[96, 96]) if i else None
             for i in range(slice_num)
         )
 
@@ -72,11 +77,11 @@ class MLICPlusPlusSDVbr(CompressionModel):
 
         # Latent Residual Prediction
         self.lrp_anchor = nn.ModuleList(
-            LatentResidualPrediction(in_dim=M + (i + 1) * slice_ch, out_dim=slice_ch)
+            LatentResidualPredictionOld(in_dim=M + (i + 1) * slice_ch, out_dim=slice_ch)
             for i in range(slice_num)
         )
         self.lrp_nonanchor = nn.ModuleList(
-            LatentResidualPrediction(in_dim=M + (i + 1) * slice_ch, out_dim=slice_ch)
+            LatentResidualPredictionOld(in_dim=M + (i + 1) * slice_ch, out_dim=slice_ch)
             for i in range(slice_num)
         )
 
@@ -84,12 +89,12 @@ class MLICPlusPlusSDVbr(CompressionModel):
         ###################################################### VBR modules ####################################################
 
         # lambdas to use during training
-        self.lmbda = [0.0005, 0.0035, 0.0067, 0.025, 0.0483, 0.18]
+        self.lmbda = [0.0002, 0.0005, 0.0035, 0.0483, 0.18]
         self.levels = len(self.lmbda)
         # gain: inverse of quantization step size
         self.Gain = torch.nn.Parameter(
             torch.tensor(
-                [0.06556, 0.13944, 0.19293, 0.37268, 0.51801, 1.00000]
+                [0.002424, 0.06556, 0.13944, 0.51801, 1.00000]
             ),
             requires_grad=True,
         )
@@ -125,7 +130,7 @@ class MLICPlusPlusSDVbr(CompressionModel):
         sp_p = []
         
         for i, v in self.named_parameters():
-            if "gain" in i:
+            if "gain" in i or "Gain" in i:
                 sp_p.append(v)
             else:
                 share_p.append(v)
@@ -1142,14 +1147,14 @@ class MLICPlusPlusSDVbr(CompressionModel):
 
         return x_hat
 
-    def load_state_dict(self, state_dict):
+    def load_state_dict(self, state_dict, strict=False):
         update_registered_buffers(
             self.gaussian_conditional,
             "gaussian_conditional",
             ["_quantized_cdf", "_offset", "_cdf_length", "scale_table"],
             state_dict,
         )
-        super().load_state_dict(state_dict, strict=False)
+        super().load_state_dict(state_dict, strict=strict)
 
     # def update(self, scale_table=None, force=False):
     #     if scale_table is None:
@@ -1186,3 +1191,37 @@ class MLICPlusPlusSDVbr(CompressionModel):
             rv = self.entropy_bottleneck.update(force=force)
         updated |= rv
         return updated
+    
+    @staticmethod
+    def load_matching_state_dict(model, checkpoint_state_dict):
+        """
+        选择性加载检查点的 state_dict，仅加载形状匹配的参数。
+
+        :param model: 模型。
+        :param checkpoint_state_dict: 检查点的 state_dict。
+        """
+        model_state_dict = model.state_dict()
+        for key in model_state_dict:
+            if key in checkpoint_state_dict:
+                if model_state_dict[key].shape == checkpoint_state_dict[key].shape:
+                    # model_state_dict[key] = checkpoint_state_dict[key]
+                    print(f"Key '{key}': Loaded successfully.")
+                else:
+                    if "gaussian_conditional" not in key and "entropy_bottleneck" not in key:
+                        del checkpoint_state_dict[key]
+                        print(f"Key '{key}': Shape mismatch! Skipping...")
+            else:
+                print(f"Key '{key}': Not found in checkpoint. Skipping...")
+        
+        return model
+
+    def load_pretrained(self, state_dict):
+        self.load_matching_state_dict(self, state_dict)
+        self.load_state_dict(state_dict, strict=False)
+
+    def frezze_some_layers(self):
+        frezze_layers = [self.g_a, self.h_a, self.local_context, self.global_inter_context, self.global_intra_context]
+
+        for layer in frezze_layers:
+            for i in layer.parameters():
+                i.requires_grad = False
