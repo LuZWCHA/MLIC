@@ -737,6 +737,8 @@ class POELIC_Loss_Trainer(Trainer):
 if __name__ == '__main__':
     from config.args import train_options
     args = train_options()
-    # trainer = Trainer(args)
-    trainer = VBRTrainer(args)
+    if not args.vbr:
+        trainer = Trainer(args)
+    else:
+        trainer = VBRTrainer(args)
     trainer.fit()
