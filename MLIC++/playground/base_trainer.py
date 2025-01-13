@@ -156,10 +156,11 @@ class BaseTrainer:
         if self.is_main_process():
             val_metrics = self.validate_epoch(epoch)
         
+        is_best = val_metrics["loss"] < self.best_loss
         # 保存最佳模型
-        if self.is_main_process() and val_metrics["loss"] < self.best_loss:
+        if self.is_main_process() and is_best:
             self.best_loss = val_metrics["loss"]
-            self._save_checkpoint(epoch, val_metrics["loss"])
+        self._save_checkpoint(epoch, val_metrics["loss"], is_best)
 
         dist.barrier()
 
@@ -276,7 +277,7 @@ class BaseTrainer:
     def _load_checkpoint(self):
         pass
 
-    def _save_checkpoint(self, epoch, val_loss):
+    def _save_checkpoint(self, epoch, val_loss, is_best):
         """保存检查点"""
         checkpoint_path = os.path.join(self.checkpoint_dir, f"checkpoint_{epoch + 1:03d}.pth.tar")
         save_checkpoint(
@@ -288,7 +289,7 @@ class BaseTrainer:
                 "aux_optimizer": self.aux_optimizer.state_dict(),
                 "lr_scheduler": self.lr_scheduler.state_dict(),
             },
-            True,
+            is_best,
             checkpoint_path
         )
         self.logger_val.info('Best checkpoint saved.')

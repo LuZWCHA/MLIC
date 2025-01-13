@@ -422,7 +422,7 @@ class VBRTrainer(Trainer):
             if gamma < tol:
                 break
         
-        print(f"Iter: {iteration}")
+        # print(f"Iter: {iteration}")
         return alpha
 
 
@@ -495,7 +495,7 @@ class VBRTrainer(Trainer):
         self.model
         images = batch["image"].to(self.device)
         
-        self.aux_optimizer.zero_grad()
+        
         gradients_theta = []
         gradients_shared = []
         
@@ -516,16 +516,22 @@ class VBRTrainer(Trainer):
                 # i = batch_idx % N
                 self.gain_optimizer.zero_grad()
                 self.optimizer.zero_grad()
+                self.aux_optimizer.zero_grad()
+                
                 out_net = self.model.forward(images, stage=2, s=i)
-                aux_loss = actual_model.aux_loss()
+                
                 self.criterion.set_lmbda(actual_model.lmbda[i])
                 out_criterion = self.criterion(out_net, images)
                 loss = out_criterion["loss"]
                 loss_all.append(out_criterion)
                 scaler.scale(loss).backward()
+                
+                aux_loss = actual_model.aux_loss()
                 scaler.scale(aux_loss).backward()
+                
                 scaler.step(self.aux_optimizer)
                 scaler.step(self.gain_optimizer)
+                
                 # Collect gradients for shared parameters of task i
                 gradients_theta = [sp.grad.detach().clone() for sp in shared_parameters if sp.grad is not None]
 
@@ -551,9 +557,9 @@ class VBRTrainer(Trainer):
         # alpha = self.__min_norm_solver(flattened_gradients)
         
         # Frank-Wolfe solver
-        start = time.time_ns()
+        # start = time.time_ns()
         alpha = self.frank_wolfe_solver(torch.stack(flattened_gradients, dim=0), alpha_prev=self.prev_alpha)
-        print(f"Cost: {(time.time_ns() - start) / 1e6} ms")
+        # print(f"Cost: {(time.time_ns() - start) / 1e6} ms")
         self.prev_alpha = alpha
         
         # Combine gradients
