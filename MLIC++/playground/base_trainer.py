@@ -78,6 +78,9 @@ class BaseTrainer:
         if self.args.checkpoint is not None:
             self._load_checkpoint()
 
+        if self.is_main_process():
+            self.logger_train.info(args)
+
     def __rest(self):
         # 初始化训练状态
         self.best_loss = float('inf')

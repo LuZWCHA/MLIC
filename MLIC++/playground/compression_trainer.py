@@ -747,17 +747,24 @@ class EXPTrainer(Trainer):
     def _setup_criterion(self):
         self.criterion = RateDistortionLossExp(lmbda=self.args.lmbda, metrics=self.args.metrics)
 
+    def _setup_train_data(self):
+        return super()._setup_train_data()
+    
     def _setup_test_data(self):
         """初始化测试数据集"""
         test_transforms = transforms.Compose([transforms.ToTensor()])
-        self.test_dataset = ImageFolder2(self.args.dataset, split="train", transform=test_transforms)
+        self.test_dataset = ImageFolder2(self.args.dataset, split="test", transform=test_transforms)
 
+        self.test_sampler = DistributedSampler(self.test_dataset, rank=self.local_rank) if self.ddp_enable else None
         test_loader = DataLoader(
             self.test_dataset,
-            batch_size=self.args.test_batch_size,
+            batch_size=1,
             num_workers=self.args.num_workers,
-            shuffle=False,
-            pin_memory=(self.device == "cuda")
+            shuffle=(self.test_sampler is None),
+            pin_memory=True,
+            pin_memory_device=str(self.device),
+            sampler=self.test_sampler,
+            persistent_workers=True
         )
         return test_loader
 
@@ -921,6 +928,8 @@ class EXPTrainer(Trainer):
 
         # 释放检查点以节省内存
         checkpoint = None
+        
+        
 if __name__ == '__main__':
     from config.args import train_options
     args = train_options()
